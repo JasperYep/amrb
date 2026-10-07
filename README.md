@@ -54,6 +54,16 @@ uv run amrb paper sync
 uv run amrb service status
 ```
 
+大批量离线入库可选用 OpenAI-compatible Batch File API；是否支持取决于 Embedding 服务商。任务会等待 Batch 完成后写入索引。若中断，可用本地 job ID 查询或继续：
+
+单个任务最多 50,000 个 chunk 请求、输入文件不超过 500 MB；服务商可能设置更低上限。
+
+```bash
+uv run amrb paper add --batch papers/*.pdf
+uv run amrb paper batch status <job-id>
+uv run amrb paper batch wait <job-id>
+```
+
 Hindsight 官方 Web UI 是可选的独立进程：
 
 ```bash

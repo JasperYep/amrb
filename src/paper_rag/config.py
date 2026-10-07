@@ -79,6 +79,10 @@ class Settings(BaseSettings):
         return self.workspace_root / ".state"
 
     @property
+    def embedding_batches_dir(self) -> Path:
+        return self.state_dir / "embedding_batches"
+
+    @property
     def manifest_path(self) -> Path:
         return self.state_dir / "index.json"
 

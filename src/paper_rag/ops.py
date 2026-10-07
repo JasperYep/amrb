@@ -11,6 +11,8 @@ import pymupdf
 
 from paper_rag.config import Settings, create_qdrant_client, create_vector_store, get_settings
 from paper_rag.ingest import (
+    _delete_paper,
+    _paper_nodes,
     ingest_papers,
     load_manifest,
     sha256_file,
@@ -121,7 +123,8 @@ def add_papers(
             if source.suffix.lower() != ".pdf":
                 raise ValueError("只支持 PDF 文件。")
             with pymupdf.open(source) as pdf:
-                if pdf.page_count < 1:
+                pages = pdf.page_count
+                if pages < 1:
                     raise ValueError("PDF 没有页面。")
 
             digest = sha256_file(source)
@@ -184,6 +187,7 @@ def add_papers(
             result.failed.append(_failure(source_label, exc, copied, current))
 
     return result
+
 
 
 def sync_papers(

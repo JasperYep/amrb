@@ -20,6 +20,8 @@ When the user asks to add one or more local PDFs:
 3. Run `uv run amrb paper add <paths...>`.
 4. Report papers added, already indexed, and failures. If indexing failed after a copy, say that the file was copied but is not indexed.
 
+For an explicitly requested large offline ingest, use `uv run amrb paper add --batch <paths...>` only when the configured embedding endpoint is known to support the OpenAI-compatible Batch File API. OpenAI-compatible embeddings alone do not imply Batch support. The command prints a local job ID; use `uv run amrb paper batch status <job-id>` to inspect it and `uv run amrb paper batch wait <job-id>` to resume waiting and apply results. The user's local `.state/` must be preserved until the job is applied.
+
 Do not manually copy files and run ingestion when `amrb paper add` can do the complete operation.
 
 ## Sync

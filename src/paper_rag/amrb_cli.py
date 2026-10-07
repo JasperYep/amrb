@@ -10,9 +10,15 @@ from urllib.parse import urlsplit
 import typer
 from rich.console import Console
 
+from paper_rag.batch import add_papers_batch, paper_batch_status, wait_paper_batch
 from paper_rag.config import get_settings
 from paper_rag.health import get_system_status, run_doctor, _check_bank
-from paper_rag.ops import add_papers, list_paper_records, remove_paper, sync_papers
+from paper_rag.ops import (
+    add_papers,
+    list_paper_records,
+    remove_paper,
+    sync_papers,
+)
 from paper_rag.service import (
     hindsight_healthcheck,
     restart_service,
@@ -24,9 +30,11 @@ from paper_rag.setup import setup_workspace
 
 app = typer.Typer(no_args_is_help=True, help="Operations for the Agent Memory Research Workspace.")
 paper_app = typer.Typer(no_args_is_help=True)
+batch_app = typer.Typer(no_args_is_help=True)
 service_app = typer.Typer(no_args_is_help=True)
 open_app = typer.Typer(no_args_is_help=True)
 app.add_typer(paper_app, name="paper")
+paper_app.add_typer(batch_app, name="batch")
 app.add_typer(service_app, name="service")
 app.add_typer(open_app, name="open")
 console = Console()
@@ -56,6 +64,28 @@ def _json(value: Any) -> None:
 def _valid_web_url(url: str) -> bool:
     parsed = urlsplit(url)
     return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+
+
+def _batch_status_callback(progress_console: Console) -> Any:
+    last_update: tuple[str, tuple[tuple[str, int], ...]] | None = None
+
+    def report(
+        local_id: str,
+        status: str,
+        counts: dict[str, int] | None,
+    ) -> None:
+        nonlocal last_update
+        normalized_counts = tuple(sorted((counts or {}).items()))
+        update = (status, normalized_counts)
+        if update == last_update:
+            return
+        last_update = update
+        summary = ""
+        if counts:
+            summary = f" · {counts.get('completed', 0)}/{counts.get('total', 0)} requests"
+        progress_console.print(f"Batch {local_id}: {status}{summary}")
+
+    return report
 
 
 @app.command()
@@ -142,9 +172,37 @@ def doctor(
 def paper_add(
     paths: list[str] = typer.Argument(..., help="One or more local PDF paths."),
     as_json: bool = typer.Option(False, "--json", help="Print stable JSON."),
+    batch_mode: bool = typer.Option(
+        False,
+        "--batch",
+        help="Use the provider's OpenAI-compatible Batch File API for offline indexing.",
+    ),
 ) -> None:
-    """Copy PDFs into papers/ and incrementally index them."""
-    result = _run(lambda: add_papers([Path(path) for path in paths]))
+    """Copy PDFs into papers/ and index them, optionally with Batch File."""
+    source_paths = [Path(path) for path in paths]
+    if batch_mode:
+        progress_console = error_console if as_json else console
+        status_update = _batch_status_callback(progress_console)
+
+        def submitted(local_id: str, remote_id: str) -> None:
+            progress_console.print(
+                f"Batch submitted: {remote_id} · local job {local_id}. "
+                f"Resume with `uv run amrb paper batch wait {local_id}`."
+            )
+
+        result = _run(
+            lambda: add_papers_batch(
+                source_paths,
+                on_submitted=submitted,
+                on_status=status_update,
+            )
+        )
+    else:
+        result = _run(lambda: add_papers(source_paths))
+    _print_paper_add_result(result, as_json)
+
+
+def _print_paper_add_result(result: Any, as_json: bool) -> None:
     if as_json:
         _json(result)
         if result.failed:
@@ -161,6 +219,43 @@ def paper_add(
         console.print(f"            {'File copied; index failed. ' if failure.copied else ''}{failure.message}")
     if result.failed:
         raise typer.Exit(code=1)
+
+
+@batch_app.command("status")
+def paper_batch_status_command(
+    job_id: str = typer.Argument(..., help="Local AMRB Batch job ID."),
+    as_json: bool = typer.Option(False, "--json", help="Print stable JSON."),
+) -> None:
+    """Inspect an AMRB Batch job."""
+    status = _run(lambda: paper_batch_status(job_id))
+    if as_json:
+        _json(status)
+    else:
+        console.print(f"Local job  {status['job_id']}")
+        if status.get("batch_id"):
+            console.print(f"Provider   {status['batch_id']}")
+        console.print(f"Status     {status.get('status', 'unknown')}")
+        counts = status.get("request_counts")
+        if counts:
+            console.print(
+                f"Requests   {counts.get('completed', 0)}/{counts.get('total', 0)} "
+                f"completed · {counts.get('failed', 0)} failed"
+            )
+
+
+@batch_app.command("wait")
+def paper_batch_wait_command(
+    job_id: str = typer.Argument(..., help="Local AMRB Batch job ID."),
+    as_json: bool = typer.Option(False, "--json", help="Print stable JSON."),
+) -> None:
+    """Wait for a submitted Batch job and apply its vectors to Qdrant."""
+    progress_console = error_console if as_json else console
+    status_update = _batch_status_callback(progress_console)
+
+    result = _run(
+        lambda: wait_paper_batch(job_id, on_status=status_update)
+    )
+    _print_paper_add_result(result, as_json)
 
 
 @paper_app.command("sync")
