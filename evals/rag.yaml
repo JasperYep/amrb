@@ -1,13 +1,17 @@
 top_k: 8
 cases:
-  - query: "How does Hindsight perform memory consolidation?"
+  - query: "How does GateMem benchmark memory governance in multi-principal shared-memory agents?"
     expected_papers:
-      - hindsight
+      - gatemem
 
-  - query: "How does Mem0 update memories?"
+  - query: "How does MemSecBench track agent memory poisoning from persistence to consequence and repair?"
     expected_papers:
-      - mem0
+      - memsecbench
 
-  - query: "Which work evaluates long-term memory retrieval?"
+  - query: "How does ToolPrivacyBench benchmark purpose-bound privacy in tool-using LLM agents?"
     expected_papers:
-      - longmemeval
+      - toolprivacybench
+
+  - query: "How does Mem2ActBench evaluate long-term memory utilization in task-oriented autonomous agents?"
+    expected_papers:
+      - mem2actbench
