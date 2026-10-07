@@ -1,0 +1,54 @@
+import json
+
+import pytest
+
+from paper_rag import server
+from paper_rag.models import PaperBrief, PaperHit, PaperPage
+
+
+@pytest.mark.asyncio
+async def test_mcp_exposes_three_tools_with_structured_outputs(monkeypatch):
+    expected_names = {"search_papers", "list_papers", "get_paper_pages"}
+    tools = await server.mcp.list_tools()
+    assert {tool.name for tool in tools} == expected_names
+    assert all(tool.output_schema for tool in tools)
+
+    hit = PaperHit(
+        paper_id="0123456789abcdef",
+        title="Fixture Research",
+        file_name="fixture.pdf",
+        page=3,
+        score=0.9,
+        text="Memory update modifies previously retained information.",
+    )
+    paper = PaperBrief(
+        paper_id=hit.paper_id,
+        title=hit.title,
+        file_name=hit.file_name,
+    )
+    page = PaperPage(
+        paper_id=hit.paper_id,
+        title=hit.title,
+        file_name=hit.file_name,
+        page=3,
+        citation=hit.citation,
+        text=hit.text,
+    )
+    monkeypatch.setattr(server, "retrieve_papers", lambda **kwargs: [hit])
+    monkeypatch.setattr(server, "read_papers", lambda: [paper])
+    monkeypatch.setattr(server, "read_paper_pages", lambda **kwargs: [page])
+
+    results = [
+        await server.mcp.call_tool("search_papers", {"query": "memory update"}),
+        await server.mcp.call_tool("list_papers", {}),
+        await server.mcp.call_tool(
+            "get_paper_pages",
+            {"paper_id": hit.paper_id, "start_page": 3},
+        ),
+    ]
+    serialized = [json.dumps(result.model_dump(mode="json", by_alias=True)) for result in results]
+
+    assert all(not result.is_error for result in results)
+    assert "Fixture Research, p. 3" in serialized[0]
+    assert "fixture.pdf" in serialized[1]
+    assert "Memory update modifies" in serialized[2]

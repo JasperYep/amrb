@@ -1,0 +1,40 @@
+[project]
+name = "agent-memory-research"
+version = "0.1.0"
+description = "A local-first Agent Memory research workspace for Codex"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "llama-index-core>=0.14,<0.15",
+    "llama-index-embeddings-openai>=0.7,<0.8",
+    "llama-index-readers-file>=0.7,<0.8",
+    "llama-index-vector-stores-qdrant>=0.10,<0.11",
+    "mcp>=2.3,<3",
+    "pydantic-settings>=2.10,<3",
+    "pymupdf>=1.26,<2",
+    "qdrant-client>=1.15,<2",
+    "pyyaml>=6,<7",
+    "rich>=14,<15",
+    "typer>=0.19,<1",
+]
+
+[project.scripts]
+paper-rag = "paper_rag.cli:app"
+paper-rag-mcp = "paper_rag.server:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4,<9",
+    "pytest-asyncio>=1.2,<2",
+]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/paper_rag"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

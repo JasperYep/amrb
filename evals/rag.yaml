@@ -1,0 +1,13 @@
+top_k: 8
+cases:
+  - query: "How does Hindsight perform memory consolidation?"
+    expected_papers:
+      - hindsight
+
+  - query: "How does Mem0 update memories?"
+    expected_papers:
+      - mem0
+
+  - query: "Which work evaluates long-term memory retrieval?"
+    expected_papers:
+      - longmemeval
