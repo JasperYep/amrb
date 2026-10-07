@@ -52,8 +52,13 @@ async def configure_hindsight_bank() -> None:
     )
 
     async with Client(HINDSIGHT_MCP_URL, read_timeout_seconds=30) as client:
-        listed = await _call(client, "list_banks", {"query": BANK_ID})
-        if BANK_ID not in listed:
+        listed = json.loads(await _call(client, "list_banks", {"query": BANK_ID}))
+        existing_ids = {
+            str(bank["bank_id"])
+            for bank in listed.get("banks", [])
+            if isinstance(bank, dict) and bank.get("bank_id")
+        }
+        if BANK_ID not in existing_ids:
             await _call(
                 client,
                 "create_bank",
