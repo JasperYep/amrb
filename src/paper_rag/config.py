@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     embedding_provider: Literal["openai"] = "openai"
     embedding_model: str = "text-embedding-3-small"
     openai_api_key: SecretStr | None = None
+    openai_base_url: str | None = None
     qdrant_path: Path = Path(".state/qdrant")
     qdrant_url: str | None = None
     qdrant_api_key: SecretStr | None = None
@@ -35,7 +36,13 @@ class Settings(BaseSettings):
     rag_chunk_size: int = Field(default=700, ge=1)
     rag_chunk_overlap: int = Field(default=100, ge=0)
 
-    @field_validator("qdrant_url", "qdrant_api_key", "openai_api_key", mode="before")
+    @field_validator(
+        "qdrant_url",
+        "qdrant_api_key",
+        "openai_api_key",
+        "openai_base_url",
+        mode="before",
+    )
     @classmethod
     def empty_optional_value_is_none(cls, value: object) -> object:
         return None if value == "" else value
@@ -76,8 +83,9 @@ def create_embedding_model(settings: Settings | None = None) -> BaseEmbedding:
             "请复制 .env.example 为 .env，并配置 embedding provider。"
         )
     return OpenAIEmbedding(
-        model=current.embedding_model,
+        model_name=current.embedding_model,
         api_key=current.openai_api_key.get_secret_value(),
+        api_base=current.openai_base_url,
         max_retries=3,
     )
 

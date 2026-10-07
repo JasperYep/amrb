@@ -15,7 +15,9 @@ uv sync
 cp .env.example .env
 ```
 
-Set `OPENAI_API_KEY` in `.env`. The embedding provider and model can be changed with `EMBEDDING_PROVIDER` and `EMBEDDING_MODEL`. Qdrant uses local persistent storage in `.state/qdrant/` by default. To use a Qdrant server, set `QDRANT_URL` and optionally `QDRANT_API_KEY`.
+If the runtime refuses to read hard-linked package data during ingestion, recreate the environment with `UV_LINK_MODE=copy uv sync --locked --reinstall`.
+
+Set `OPENAI_API_KEY` in `.env`. OpenAI-compatible BYOK endpoints can be selected with `OPENAI_BASE_URL`; set `EMBEDDING_MODEL` to a model supported by that endpoint. Qdrant uses local persistent storage in `.state/qdrant/` by default. To use a Qdrant server, set `QDRANT_URL` and optionally `QDRANT_API_KEY`.
 
 ## Add Papers
 
