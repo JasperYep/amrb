@@ -64,6 +64,26 @@ def test_failed_reindex_preserves_manifest_and_old_vectors(workspace, make_pdf):
     assert new_count == old_count == 3
 
 
+def test_embedding_404_has_actionable_configuration_hint(workspace, make_pdf):
+    settings, _ = workspace
+    make_pdf(settings.papers_dir / "fixture.pdf")
+
+    class MissingEmbeddingEndpoint(RuntimeError):
+        status_code = 404
+
+    class FailingEmbedding:
+        def get_text_embedding_batch(self, texts):
+            raise MissingEmbeddingEndpoint("Error code: 404")
+
+    try:
+        ingest_papers(settings, FailingEmbedding())
+    except RuntimeError as exc:
+        assert "OPENAI_BASE_URL" in str(exc)
+        assert "EMBEDDING_MODEL" in str(exc)
+    else:
+        raise AssertionError("expected missing embedding endpoint error")
+
+
 def test_ingest_removes_deleted_paper_and_vectors(workspace, make_pdf):
     settings, embedding = workspace
     pdf = settings.papers_dir / "fixture.pdf"

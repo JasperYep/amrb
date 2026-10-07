@@ -150,6 +150,12 @@ def _index_pdf(
     try:
         embeddings = embedding_model.get_text_embedding_batch(texts)
     except Exception as exc:
+        if getattr(exc, "status_code", None) == 404:
+            raise RuntimeError(
+                f"Embedding API returned HTTP 404 while indexing {path.name}. "
+                "Check that OPENAI_BASE_URL supports OpenAI-compatible embeddings "
+                "and EMBEDDING_MODEL names an available embedding model."
+            ) from exc
         raise RuntimeError(f"Embedding failed for {path.name}: {exc}") from exc
     if len(embeddings) != len(nodes):
         raise ValueError(f"Embedding 返回数量不匹配：{path.name}")
