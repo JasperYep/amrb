@@ -8,7 +8,7 @@ Codex is the agent runtime. Paper RAG uses LlamaIndex and Qdrant to return cited
 
 ## Setup
 
-Requirements: Python 3.12 or newer, `uv`, Codex CLI, and an OpenAI embedding API key.
+Requirements: Python 3.12 or newer, `uv`, Codex CLI, and an API key for an OpenAI-compatible embedding endpoint.
 
 ```bash
 uv sync
