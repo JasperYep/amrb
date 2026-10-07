@@ -10,6 +10,7 @@ from paper_rag.config import (
     create_embedding_model,
     create_qdrant_client,
     create_vector_store,
+    ensure_paper_id_payload_index,
     get_settings,
 )
 from paper_rag.ingest import load_manifest
@@ -80,6 +81,8 @@ def search_papers(
         if not client.collection_exists(current.qdrant_collection):
             raise ValueError("Paper RAG 尚未建立索引。\n\n请先运行：\n\nuv run paper-rag ingest")
         store = create_vector_store(client, current)
+        if paper_id is not None:
+            ensure_paper_id_payload_index(client, current)
         active_embedding = embedding_model or create_embedding_model(current)
         index = VectorStoreIndex.from_vector_store(
             vector_store=store,

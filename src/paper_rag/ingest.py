@@ -274,16 +274,36 @@ def ingest_papers(
     settings: Settings | None = None,
     embedding_model: Any | None = None,
     qdrant_client: Any | None = None,
+    paths: list[Path] | None = None,
 ) -> IngestResult:
     current = settings or get_settings()
     current.papers_dir.mkdir(parents=True, exist_ok=True)
     manifest = load_manifest(current.manifest_path)
-    pdfs = sorted(current.papers_dir.glob("*.pdf"))
+    full_sync = paths is None
+    if paths is None:
+        pdfs = sorted(current.papers_dir.glob("*.pdf"))
+    else:
+        papers_root = current.papers_dir.resolve()
+        pdfs = sorted({Path(path).expanduser().resolve() for path in paths})
+        for path in pdfs:
+            if path.parent != papers_root or path.suffix.lower() != ".pdf":
+                raise ValueError("定向 ingest 只接受 papers/ 第一层中的 PDF 文件。")
+            if not path.is_file():
+                raise ValueError(f"PDF 文件不存在：{path}")
     current_hashes = {
         path.relative_to(current.workspace_root).as_posix(): sha256_file(path)
         for path in pdfs
     }
-    desired_ids = {digest[:16] for digest in current_hashes.values()}
+    if full_sync:
+        desired_ids = {digest[:16] for digest in current_hashes.values()}
+    else:
+        targeted_paths = set(current_hashes)
+        desired_ids = {
+            str(entry["paper_id"])
+            for relative_path, entry in manifest.items()
+            if relative_path not in targeted_paths and entry.get("paper_id")
+        }
+        desired_ids.update(digest[:16] for digest in current_hashes.values())
     indexed, skipped, chunks = _index_changed_files(
         pdfs,
         current_hashes,
@@ -293,12 +313,16 @@ def ingest_papers(
         embedding_model,
         qdrant_client,
     )
-    removed = _remove_missing_files(
-        current_hashes,
-        desired_ids,
-        manifest,
-        current,
-        qdrant_client,
+    removed = (
+        _remove_missing_files(
+            current_hashes,
+            desired_ids,
+            manifest,
+            current,
+            qdrant_client,
+        )
+        if full_sync
+        else 0
     )
     return IngestResult(
         discovered=len(pdfs),

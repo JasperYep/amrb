@@ -1,110 +1,63 @@
-# Agent Memory Research Workspace
+# AMRB · Agent Memory Research MCP
 
-A local-first research workspace that connects Codex to a paper evidence index and Hindsight long-term research memory.
+一个面向 Agent Memory 研究的 MCP 工作区：论文事实与个人研究认知分开保存。
 
-## Architecture
+```text
+Agent ── AMRB MCP ──┬── Paper RAG / Qdrant：论文证据
+                    └── Hindsight：研究者长期认知
+```
 
-Codex is the agent runtime. Paper RAG uses LlamaIndex and Qdrant to return cited evidence from local PDFs. Hindsight stores the researcher's long-term judgments through its MCP server. Paper evidence and personal research memory remain separate.
+同一个 MCP 提供 `search_papers`、`list_papers`、`get_paper_pages`、`retain`、`recall`、`reflect`。客户端只需注册一个 stdio MCP 命令。
 
-## Setup
+## 部署
 
-Requirements: Python 3.12 or newer, `uv`, Codex CLI, and an API key for an OpenAI-compatible embedding endpoint.
+需要 Python 3.12+、[`uv`](https://docs.astral.sh/uv/) 和任意支持 MCP 的 Agent。Linux `systemd --user` 可自动管理 Hindsight API；其他环境可按 `amrb setup` 输出手动启动。
 
 ```bash
-uv sync
+git clone git@github.com:JasperYep/amrb.git
+cd amrb
+uv sync --locked
 cp .env.example .env
 ```
 
-If the runtime refuses to read hard-linked package data during ingestion, recreate the environment with `UV_LINK_MODE=copy uv sync --locked --reinstall`.
-
-Set `EMBEDDING_API_KEY` and `EMBEDDING_BASE_URL` in `.env`. `EMBEDDING_BASE_URL` should be the OpenAI-compatible API base URL, usually ending in `/v1`; set `EMBEDDING_MODEL` to a model supported by that endpoint. Legacy `OPENAI_API_KEY` and `OPENAI_BASE_URL` values are accepted as fallbacks for Paper RAG. `OPENAI_API_KEY` can also be used if Hindsight is configured with its OpenAI provider. Qdrant uses local persistent storage in `.state/qdrant/` by default. To use a Qdrant server, set `QDRANT_URL` and optionally `QDRANT_API_KEY`.
-
-## Add Papers
-
-Copy PDF files into `papers/`, then build or update the index:
+在 `.env` 配置 Embedding 模型、Key、Base URL，以及 Hindsight LLM 的模型、Key、Base URL。两者可共用同一 OpenAI 兼容服务；Qdrant 默认本地运行，使用 Cloud 时再填写 `QDRANT_URL` 和 `QDRANT_API_KEY`。
 
 ```bash
-cp ~/Downloads/*.pdf papers/
-uv run paper-rag ingest
-uv run paper-rag status
-uv run paper-rag search "memory consolidation"
+uv run amrb setup
 ```
 
-Ingestion is incremental. Unchanged PDFs are skipped. The manifest and local vector database live under `.state/`.
-
-## Start Hindsight
-
-Hindsight's current local MCP endpoint is served by its API server. It uses an embedded database in `~/.hindsight/data/` by default. In a separate terminal, use the Codex account already signed in on this machine:
+初始化 Hindsight API、创建 AMRB 专属 `agent-memory-research` bank，并检查 Qdrant。把 PDF 放入 `papers/`，首次建索引：
 
 ```bash
-HINDSIGHT_API_LLM_PROVIDER=openai-codex \
-HINDSIGHT_API_LLM_MODEL=gpt-6-luna \
-uvx --from hindsight-api==0.10.2 hindsight-api --host 127.0.0.1
+uv run amrb paper sync
 ```
 
-The `openai-codex` provider reads the current Codex auth file (by default `~/.codex/auth.json`) and needs no separate API key. `gpt-6-luna` is the model verified with this Codex account; for another account, choose a supported model from `codex debug models`. To use an OpenAI API key instead:
+在 Agent 的 MCP 配置中注册以下 stdio 命令（把路径替换为本机仓库绝对路径）：
+
+```text
+uv --directory /path/to/amrb run amrb-mcp
+```
+
+## 隔离与数据
+
+AMRB 的 MCP 只访问 `agent-memory-research` bank。Hindsight UI 会列出同一服务中的所有 banks；列表共用不代表记忆读写混用。新电脑首次部署会创建独立的本地 Hindsight 数据库。迁移记忆时只导出/导入 AMRB bank，不要复制包含其他项目数据的整个 Hindsight 数据目录。
+
+`.env`、`.state/` 和 `papers/*.pdf` 不进 Git。换电脑时单独复制论文 PDF；本地 Qdrant 索引可用 `paper sync` 重建。Hindsight 默认数据位于 `~/.hindsight/data/`。
+
+## 日常维护
 
 ```bash
-set -a
-source .env
-set +a
-HINDSIGHT_API_LLM_PROVIDER=openai \
-HINDSIGHT_API_LLM_API_KEY="$OPENAI_API_KEY" \
-uvx --from hindsight-api==0.10.2 hindsight-api --host 127.0.0.1
+uv run amrb status
+uv run amrb doctor
+uv run amrb paper add ~/Downloads/paper.pdf
+uv run amrb paper sync
+uv run amrb service status
 ```
 
-The project connects to the single-bank endpoint `http://localhost:8888/mcp/agent-memory-research/`. See the [Hindsight installation](https://hindsight.vectorize.io/developer/installation), [model providers](https://hindsight.vectorize.io/developer/models), and [MCP server](https://hindsight.vectorize.io/developer/mcp-server) documentation for current provider and storage options.
-
-After the server is running, configure the project's bank missions from `AGENTS.md`:
+Hindsight 官方 Web UI 是可选的独立进程：
 
 ```bash
-uv run python -m paper_rag.hindsight_setup
+npx --yes @vectorize-io/hindsight-control-plane --api-url http://127.0.0.1:8888
 ```
 
-## Start Codex
-
-From the project directory:
-
-```bash
-codex
-```
-
-On first launch, trust this folder so Codex loads the project-level `.codex/config.toml`. It registers Paper RAG as a required stdio MCP server and Hindsight as an optional HTTP MCP server. Use `/mcp` in the Codex TUI to check the connections and exposed tools. Paper RAG should be connected; Hindsight connects after its API server starts.
-
-Start Hindsight before a session where long-term memory is needed. Paper RAG remains available when Hindsight is offline.
-
-## Usage
-
-Try these prompts in Codex:
-
-- `列出当前论文库里的论文。` — uses `list_papers`.
-- `Hindsight 的 memory consolidation 是怎么做的？` — uses `search_papers`.
-- `记住：我认为 Hindsight 最值得关注的是 consolidation，而不是普通 semantic retrieval。` — uses Hindsight `retain`.
-- In a later session: `我之前怎么看 Hindsight？` — uses Hindsight `recall`.
-- `综合之前的阅读，我现在对 Agent Memory evaluation 的总体观点是什么？` — uses Hindsight `reflect`.
-- `我的看法和 Hindsight 论文自己的 framing 一致吗？` — compares memory with paper evidence.
-
-When a retrieved chunk is not enough, Codex can read up to ten consecutive pages with `get_paper_pages`. Research response and selective-retain behavior are defined in `AGENTS.md`.
-
-## Maintenance
-
-```bash
-uv run paper-rag ingest
-uv run paper-rag status
-uv run paper-rag search "memory update"
-uv run paper-rag eval
-```
-
-Only `.pdf` files directly inside `papers/` are indexed. The CLI does not download papers or expose ingestion as an agent tool.
-
-## Tests
-
-```bash
-uv run pytest
-```
-
-Tests create a small three-page PDF in a temporary directory and use local Qdrant with a mock embedding model, so they do not require API credentials or real papers.
-
-## Design Boundary
-
-Codex handles reasoning and tool choice. Paper RAG reports what the indexed papers say. Hindsight retains and recalls the researcher's long-term understanding. The RAG service does not generate answers or write paper content into Hindsight.
+详细研究规则见 [AGENTS.md](AGENTS.md)；环境变量见 [.env.example](.env.example)。

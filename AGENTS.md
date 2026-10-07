@@ -85,3 +85,14 @@ Hindsight 表示我本人长期形成的研究认知。
 不要写宣传式论文摘要。
 
 如果用户只问一个具体问题，直接回答该问题，不机械输出固定模板。
+
+## Workspace Operations
+
+For workspace maintenance such as adding papers, syncing the index, checking system health, managing the Hindsight service, or opening infrastructure UIs, use the `amrb-ops` workflow.
+
+Prefer the stable `amrb` CLI over manually reproducing low-level commands.
+
+Keep research retrieval separate:
+
+- Paper evidence → Paper RAG MCP
+- Long-term research cognition → Hindsight MCP

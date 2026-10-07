@@ -1,7 +1,7 @@
 [project]
 name = "agent-memory-research"
 version = "0.1.0"
-description = "A local-first Agent Memory research workspace for Codex"
+description = "A local-first Agent Memory research MCP server"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -19,6 +19,8 @@ dependencies = [
 ]
 
 [project.scripts]
+amrb = "paper_rag.amrb_cli:app"
+amrb-mcp = "paper_rag.server:main"
 paper-rag = "paper_rag.cli:app"
 paper-rag-mcp = "paper_rag.server:main"
 

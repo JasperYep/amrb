@@ -1,11 +1,6 @@
-[mcp_servers.paper-rag]
+[mcp_servers.amrb]
 command = "uv"
-args = ["run", "paper-rag-mcp"]
+args = ["run", "amrb-mcp"]
 required = true
-enabled_tools = ["search_papers", "list_papers", "get_paper_pages"]
+enabled_tools = ["search_papers", "list_papers", "get_paper_pages", "retain", "recall", "reflect"]
 startup_timeout_sec = 30
-
-[mcp_servers.hindsight]
-url = "http://localhost:8888/mcp/agent-memory-research/"
-required = false
-enabled_tools = ["retain", "recall", "reflect"]

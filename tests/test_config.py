@@ -60,3 +60,11 @@ def test_openai_api_key_remains_supported_as_legacy_alias(monkeypatch):
     settings = Settings(_env_file=None)
 
     assert settings.embedding_api_key.get_secret_value() == "legacy-key"
+    assert settings.openai_api_key.get_secret_value() == "legacy-key"
+
+
+def test_hindsight_llm_settings_are_agent_agnostic_defaults():
+    settings = Settings(_env_file=None)
+
+    assert settings.hindsight_api_llm_provider == "openai"
+    assert settings.hindsight_api_llm_model == "gpt-4o-mini"
