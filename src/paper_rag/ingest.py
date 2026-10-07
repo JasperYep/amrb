@@ -150,10 +150,16 @@ def _index_pdf(
     try:
         embeddings = embedding_model.get_text_embedding_batch(texts)
     except Exception as exc:
+        if getattr(exc, "status_code", None) in {401, 403}:
+            raise RuntimeError(
+                "Embedding API authentication or access failed "
+                f"(HTTP {exc.status_code}) while indexing {path.name}. "
+                "Check that EMBEDDING_API_KEY is valid for EMBEDDING_BASE_URL."
+            ) from exc
         if getattr(exc, "status_code", None) == 404:
             raise RuntimeError(
                 f"Embedding API returned HTTP 404 while indexing {path.name}. "
-                "Check that OPENAI_BASE_URL supports OpenAI-compatible embeddings "
+                "Check that EMBEDDING_BASE_URL supports OpenAI-compatible embeddings "
                 "and EMBEDDING_MODEL names an available embedding model."
             ) from exc
         raise RuntimeError(f"Embedding failed for {path.name}: {exc}") from exc

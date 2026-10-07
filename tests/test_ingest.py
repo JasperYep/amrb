@@ -78,10 +78,30 @@ def test_embedding_404_has_actionable_configuration_hint(workspace, make_pdf):
     try:
         ingest_papers(settings, FailingEmbedding())
     except RuntimeError as exc:
-        assert "OPENAI_BASE_URL" in str(exc)
+        assert "EMBEDDING_BASE_URL" in str(exc)
         assert "EMBEDDING_MODEL" in str(exc)
     else:
         raise AssertionError("expected missing embedding endpoint error")
+
+
+def test_embedding_401_has_actionable_configuration_hint(workspace, make_pdf):
+    settings, _ = workspace
+    make_pdf(settings.papers_dir / "fixture.pdf")
+
+    class InvalidKey(RuntimeError):
+        status_code = 401
+
+    class FailingEmbedding:
+        def get_text_embedding_batch(self, texts):
+            raise InvalidKey("Error code: 401")
+
+    try:
+        ingest_papers(settings, FailingEmbedding())
+    except RuntimeError as exc:
+        assert "EMBEDDING_API_KEY" in str(exc)
+        assert "EMBEDDING_BASE_URL" in str(exc)
+    else:
+        raise AssertionError("expected invalid embedding key error")
 
 
 def test_ingest_removes_deleted_paper_and_vectors(workspace, make_pdf):

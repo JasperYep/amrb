@@ -17,7 +17,7 @@ cp .env.example .env
 
 If the runtime refuses to read hard-linked package data during ingestion, recreate the environment with `UV_LINK_MODE=copy uv sync --locked --reinstall`.
 
-Set `OPENAI_API_KEY` in `.env`. OpenAI-compatible BYOK endpoints can be selected with `OPENAI_BASE_URL`; set `EMBEDDING_MODEL` to a model supported by that endpoint. Qdrant uses local persistent storage in `.state/qdrant/` by default. To use a Qdrant server, set `QDRANT_URL` and optionally `QDRANT_API_KEY`.
+Set `EMBEDDING_API_KEY` and `EMBEDDING_BASE_URL` in `.env`. `EMBEDDING_BASE_URL` should be the OpenAI-compatible API base URL, usually ending in `/v1`; set `EMBEDDING_MODEL` to a model supported by that endpoint. Legacy `OPENAI_API_KEY` and `OPENAI_BASE_URL` values are accepted as fallbacks for Paper RAG. `OPENAI_API_KEY` can also be used if Hindsight is configured with its OpenAI provider. Qdrant uses local persistent storage in `.state/qdrant/` by default. To use a Qdrant server, set `QDRANT_URL` and optionally `QDRANT_API_KEY`.
 
 ## Add Papers
 

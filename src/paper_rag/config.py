@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from qdrant_client import QdrantClient
 
@@ -21,13 +21,20 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
+        populate_by_name=True,
     )
 
     workspace_root: Path = PROJECT_ROOT
     embedding_provider: Literal["openai"] = "openai"
     embedding_model: str = "text-embedding-3-small"
-    openai_api_key: SecretStr | None = None
-    openai_base_url: str | None = None
+    embedding_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("EMBEDDING_API_KEY", "OPENAI_API_KEY"),
+    )
+    embedding_base_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("EMBEDDING_BASE_URL", "OPENAI_BASE_URL"),
+    )
     qdrant_path: Path = Path(".state/qdrant")
     qdrant_url: str | None = None
     qdrant_api_key: SecretStr | None = None
@@ -39,8 +46,8 @@ class Settings(BaseSettings):
     @field_validator(
         "qdrant_url",
         "qdrant_api_key",
-        "openai_api_key",
-        "openai_base_url",
+        "embedding_api_key",
+        "embedding_base_url",
         mode="before",
     )
     @classmethod
@@ -77,15 +84,16 @@ def create_embedding_model(settings: Settings | None = None) -> BaseEmbedding:
     current = settings or get_settings()
     if current.embedding_provider != "openai":
         raise ValueError(f"Unsupported embedding provider: {current.embedding_provider}")
-    if not current.openai_api_key or not current.openai_api_key.get_secret_value():
+    if not current.embedding_api_key or not current.embedding_api_key.get_secret_value():
         raise ValueError(
-            "缺少 OPENAI_API_KEY。\n\n"
+            "缺少 EMBEDDING_API_KEY（也可使用旧变量 OPENAI_API_KEY）。\n\n"
             "请复制 .env.example 为 .env，并配置 embedding provider。"
         )
     return OpenAIEmbedding(
         model_name=current.embedding_model,
-        api_key=current.openai_api_key.get_secret_value(),
-        api_base=current.openai_base_url,
+        embed_batch_size=20,
+        api_key=current.embedding_api_key.get_secret_value(),
+        api_base=current.embedding_base_url,
         max_retries=3,
     )
 
