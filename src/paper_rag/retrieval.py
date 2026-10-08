@@ -1,4 +1,7 @@
+from atexit import register
+from dataclasses import dataclass
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from llama_index.core import VectorStoreIndex
@@ -15,6 +18,65 @@ from paper_rag.config import (
 )
 from paper_rag.ingest import load_manifest
 from paper_rag.models import PaperBrief, PaperHit, PaperPage, PaperRAGStatus
+
+
+@dataclass
+class _SearchResources:
+    client: Any
+    store: Any
+    embedding_model: Any
+    index: Any
+
+
+_RESOURCE_LOCK = RLock()
+_DEFAULT_EMBEDDING_MODEL: Any | None = None
+_DEFAULT_REMOTE_SEARCH_RESOURCES: _SearchResources | None = None
+
+
+def _default_embedding_model() -> Any:
+    global _DEFAULT_EMBEDDING_MODEL
+    with _RESOURCE_LOCK:
+        if _DEFAULT_EMBEDDING_MODEL is None:
+            _DEFAULT_EMBEDDING_MODEL = create_embedding_model(get_settings())
+        return _DEFAULT_EMBEDDING_MODEL
+
+
+def _default_remote_search_resources(settings: Settings) -> _SearchResources:
+    global _DEFAULT_REMOTE_SEARCH_RESOURCES
+    with _RESOURCE_LOCK:
+        if _DEFAULT_REMOTE_SEARCH_RESOURCES is None:
+            client = create_qdrant_client(settings)
+            try:
+                if not client.collection_exists(settings.qdrant_collection):
+                    raise ValueError(
+                        "Paper RAG 尚未建立索引。\n\n"
+                        "请先运行：\n\nuv run paper-rag ingest"
+                    )
+                store = create_vector_store(client, settings)
+                embedding_model = _default_embedding_model()
+                index = VectorStoreIndex.from_vector_store(
+                    vector_store=store,
+                    embed_model=embedding_model,
+                )
+            except Exception:
+                client.close()
+                raise
+            _DEFAULT_REMOTE_SEARCH_RESOURCES = _SearchResources(
+                client=client,
+                store=store,
+                embedding_model=embedding_model,
+                index=index,
+            )
+        return _DEFAULT_REMOTE_SEARCH_RESOURCES
+
+
+def _close_default_remote_search_client() -> None:
+    with _RESOURCE_LOCK:
+        if _DEFAULT_REMOTE_SEARCH_RESOURCES is not None:
+            _DEFAULT_REMOTE_SEARCH_RESOURCES.client.close()
+
+
+register(_close_default_remote_search_client)
 
 
 def list_papers(settings: Settings | None = None) -> list[PaperBrief]:
@@ -75,19 +137,49 @@ def search_papers(
     else:
         paper_id = None
 
-    client = qdrant_client if qdrant_client is not None else create_qdrant_client(current)
-    close_client = qdrant_client is None
+    cached_resources = None
+    # Keep remote connections open across MCP calls. Embedded Qdrant holds a
+    # storage lock, so its client must stay request-scoped while CLI commands
+    # may access the same local database.
+    if (
+        settings is None
+        and qdrant_client is None
+        and embedding_model is None
+        and current.qdrant_url
+    ):
+        cached_resources = _default_remote_search_resources(current)
+
+    if cached_resources is not None:
+        client = cached_resources.client
+    elif qdrant_client is not None:
+        client = qdrant_client
+    else:
+        client = create_qdrant_client(current)
+    close_client = cached_resources is None and qdrant_client is None
     try:
-        if not client.collection_exists(current.qdrant_collection):
-            raise ValueError("Paper RAG 尚未建立索引。\n\n请先运行：\n\nuv run paper-rag ingest")
-        store = create_vector_store(client, current)
+        if cached_resources is None:
+            if not client.collection_exists(current.qdrant_collection):
+                raise ValueError(
+                    "Paper RAG 尚未建立索引。\n\n"
+                    "请先运行：\n\nuv run paper-rag ingest"
+                )
+            store = create_vector_store(client, current)
+        else:
+            store = cached_resources.store
         if paper_id is not None:
             ensure_paper_id_payload_index(client, current)
-        active_embedding = embedding_model or create_embedding_model(current)
-        index = VectorStoreIndex.from_vector_store(
-            vector_store=store,
-            embed_model=active_embedding,
-        )
+        if cached_resources is None:
+            active_embedding = embedding_model or (
+                _default_embedding_model()
+                if settings is None
+                else create_embedding_model(current)
+            )
+            index = VectorStoreIndex.from_vector_store(
+                vector_store=store,
+                embed_model=active_embedding,
+            )
+        else:
+            index = cached_resources.index
         filters = (
             MetadataFilters(filters=[MetadataFilter(key="paper_id", value=paper_id)])
             if paper_id

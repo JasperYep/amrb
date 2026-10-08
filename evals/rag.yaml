@@ -1,17 +1,155 @@
 top_k: 8
 cases:
-  - query: "How does GateMem benchmark memory governance in multi-principal shared-memory agents?"
+  - id: generative-agents-recall
+    category: memory_architecture
+    language: en
+    query: "How do Generative Agents retrieve past observations and reflections to guide later behavior?"
+    expected_papers:
+      - generative-agents
+
+  - id: memgpt-context-management
+    category: memory_architecture
+    language: en
+    query: "How does MemGPT manage long interactions by moving information between context and external memory?"
+    expected_papers:
+      - memgpt
+
+  - id: a-mem-evolving-memory
+    category: memory_architecture
+    language: en
+    query: "How does A-MEM organize an agent's memories and adapt their links as new interactions arrive?"
+    expected_papers:
+      - a-mem-agentic-memory
+
+  - id: zep-temporal-memory
+    category: memory_architecture
+    language: en
+    query: "How does Zep represent temporal changes in an agent's long-term user memory?"
+    expected_papers:
+      - zep-a-temporal-knowledge-graph
+
+  - id: mirix-memory-components
+    category: memory_architecture
+    language: en
+    query: "What memory components does MIRIX use in its multi-agent LLM system?"
+    expected_papers:
+      - mirix
+
+  - id: episodic-memory-definition-zh
+    category: implicit_and_episodic_memory
+    language: zh
+    query: "哪篇论文主张长期 LLM Agent 需要情景记忆，并强调保存具体事件及其情境？"
+    expected_papers:
+      - position-episodic-memory
+
+  - id: delta-mem-online-state-zh
+    category: implicit_and_episodic_memory
+    language: zh
+    query: "哪项工作用紧凑的在线状态实现 LLM 记忆，而不是把记忆文本放回提示词？"
+    expected_papers:
+      - δ-mem
+
+  - id: personamem-implicit-persona
+    category: implicit_and_episodic_memory
+    language: en
+    query: "Which work learns implicit user personas to support personalized intelligence and agent memory?"
+    expected_papers:
+      - personamem-v2
+
+  - id: membench-capabilities
+    category: memory_evaluation
+    language: en
+    query: "What benchmark evaluates a broad range of memory capabilities in LLM-based agents?"
+    expected_papers:
+      - membench
+
+  - id: mem2actbench-memory-use
+    category: memory_evaluation
+    language: en
+    query: "Which benchmark evaluates whether task-oriented agents can use long-term memory to complete tasks?"
+    expected_papers:
+      - mem2actbench
+
+  - id: halumem-memory-hallucination
+    category: memory_evaluation
+    language: en
+    query: "What benchmark measures hallucinations in the memory systems of agents?"
+    expected_papers:
+      - halumem
+
+  - id: tame-trustworthy-evolution
+    category: memory_evaluation
+    language: en
+    query: "How does TAME study trustworthy test-time evolution of agent memory?"
+    expected_papers:
+      - tame
+
+  - id: very-long-term-conversation
+    category: memory_evaluation
+    language: en
+    query: "Which work evaluates very long-term conversational memory for LLM agents?"
+    expected_papers:
+      - very-long-term-conversational-memory
+
+  - id: gatemem-governance-zh
+    category: security_and_privacy
+    language: zh
+    query: "哪篇工作研究多个主体共享 Agent 记忆时的访问治理问题？"
     expected_papers:
       - gatemem
 
-  - query: "How does MemSecBench track agent memory poisoning from persistence to consequence and repair?"
+  - id: memsecbench-poisoning
+    category: security_and_privacy
+    language: en
+    query: "How does MemSecBench evaluate memory poisoning from persistence through consequences and repair?"
     expected_papers:
       - memsecbench
 
-  - query: "How does ToolPrivacyBench benchmark purpose-bound privacy in tool-using LLM agents?"
+  - id: memsecbench-poisoning-zh
+    category: security_and_privacy
+    language: zh
+    query: "哪个基准跟踪 Agent 记忆投毒从持久化到后果及修复的全过程？"
+    expected_papers:
+      - memsecbench
+
+  - id: toolprivacybench-purpose
+    category: security_and_privacy
+    language: en
+    query: "How does ToolPrivacyBench evaluate purpose-bound privacy in tool-using LLM agents?"
     expected_papers:
       - toolprivacybench
 
-  - query: "How does Mem2ActBench evaluate long-term memory utilization in task-oriented autonomous agents?"
+  - id: amemguard-defense
+    category: security_and_privacy
+    language: en
+    query: "What proactive defense framework protects the memory of LLM-based agents?"
     expected_papers:
-      - mem2actbench
+      - amemguard
+
+  - id: memincept-injection
+    category: security_and_privacy
+    language: en
+    query: "How can stealthy memory injections steer LLM agents?"
+    expected_papers:
+      - memincept
+
+  - id: privacybench-conversation-zh
+    category: security_and_privacy
+    language: zh
+    query: "哪个基准评估个性化 AI 对话中的隐私风险？"
+    expected_papers:
+      - privacybench
+
+  - id: saferag-retrieval-security
+    category: security_and_privacy
+    language: en
+    query: "How does SafeRAG benchmark security risks in retrieval-augmented generation?"
+    expected_papers:
+      - saferag
+
+  - id: compositional-privacy-risk
+    category: security_and_privacy
+    language: en
+    query: "What work studies how collaboration between agents can create compositional privacy risks?"
+    expected_papers:
+      - the-sum-leaks-more-than-its-parts
