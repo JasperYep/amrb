@@ -1,1 +1,1 @@
-"""AMRB research workspace MCP and Paper RAG components."""
+"""AMRB retrieval and long-term memory MCP components."""

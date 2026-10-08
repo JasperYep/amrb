@@ -1,15 +1,15 @@
 ---
 name: amrb-ops
 description: >
-  Manage the local Agent Memory Research Workspace.
+  Manage a local AMRB retrieval and memory workspace.
   Use when the user asks to add, remove, sync, inspect, diagnose,
-  repair, start, restart, or open infrastructure for the AMRB paper
-  corpus or Hindsight service.
+  repair, start, restart, or open infrastructure for the AMRB document
+  collection or Hindsight service.
 ---
 
 # AMRB Operations
 
-Use this skill for workspace operations, not research reasoning. Prefer the stable `amrb` CLI over manually reproducing its internal shell steps. In this repository run it as `uv run amrb ...` to use the project environment.
+Use this skill for workspace operations. Use the AMRB MCP for retrieval and long-term memory queries. Prefer the stable `amrb` CLI over manually reproducing its internal shell steps. In this repository run it as `uv run amrb ...` to use the project environment.
 
 ## Add papers
 
@@ -69,9 +69,9 @@ If Hindsight appears unavailable:
 
 Do not build alternative local dashboards.
 
-## Research queries
+## Knowledge queries
 
-Do not use this skill for ordinary research questions. Paper evidence continues to use Paper RAG MCP. Personal long-term research cognition continues to use Hindsight MCP.
+Use the AMRB MCP for source retrieval and durable workspace memory. Use this skill for workspace operations and infrastructure maintenance.
 
 ## Output
 

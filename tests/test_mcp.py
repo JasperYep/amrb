@@ -23,7 +23,7 @@ async def test_mcp_exposes_paper_and_memory_tools(monkeypatch):
     descriptions = " ".join(tool.description or "" for tool in tools).casefold()
     assert "agent memory" not in descriptions
     assert "amrb hindsight bank" not in descriptions
-    assert "personal research" in descriptions or "researcher" in descriptions
+    assert "workspace knowledge" in descriptions
 
     hit = PaperHit(
         paper_id="0123456789abcdef",

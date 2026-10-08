@@ -1,7 +1,7 @@
 [project]
 name = "amrb"
 version = "0.1.0"
-description = "A local-first research workspace MCP server"
+description = "An agent-agnostic MCP layer for retrieval and long-term memory"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

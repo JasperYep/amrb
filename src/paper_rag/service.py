@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import plistlib
 import re
-import signal
 import shlex
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -18,6 +20,7 @@ from paper_rag.config import Settings, get_settings, redact_sensitive_text
 
 DEFAULT_HINDSIGHT_VERSION = "0.10.2"
 HINDSIGHT_SERVICE_NAME = "amrb-hindsight.service"
+HINDSIGHT_LAUNCHD_LABEL = "com.amrb.hindsight"
 DEFAULT_HINDSIGHT_HOST = "127.0.0.1"
 HINDSIGHT_API_PORT = 8888
 Runner = Callable[..., subprocess.CompletedProcess[str]]
@@ -28,6 +31,8 @@ class ServicePaths:
     config_dir: Path
     env_file: Path
     unit_file: Path
+    launch_agent_file: Path
+    log_file: Path
 
 
 def service_paths(home: Path | None = None) -> ServicePaths:
@@ -37,6 +42,8 @@ def service_paths(home: Path | None = None) -> ServicePaths:
         config_dir=config_dir,
         env_file=config_dir / "hindsight.env",
         unit_file=root / ".config" / "systemd" / "user" / HINDSIGHT_SERVICE_NAME,
+        launch_agent_file=root / "Library" / "LaunchAgents" / f"{HINDSIGHT_LAUNCHD_LABEL}.plist",
+        log_file=root / "Library" / "Logs" / "amrb-hindsight.log",
     )
 
 
@@ -72,12 +79,19 @@ def systemd_user_available(runner: Runner = subprocess.run) -> bool:
     return result.returncode == 0
 
 
+def launchd_user_available() -> bool:
+    return sys.platform == "darwin" and shutil.which("launchctl") is not None
+
+
 def service_is_active(runner: Runner = subprocess.run) -> bool:
-    if not systemd_user_available(runner):
-        return False
-    return _run(
-        ["systemctl", "--user", "is-active", "--quiet", HINDSIGHT_SERVICE_NAME], runner
-    ).returncode == 0
+    if systemd_user_available(runner):
+        return _run(
+            ["systemctl", "--user", "is-active", "--quiet", HINDSIGHT_SERVICE_NAME], runner
+        ).returncode == 0
+    if launchd_user_available():
+        target = f"gui/{os.getuid()}/{HINDSIGHT_LAUNCHD_LABEL}"
+        return _run(["launchctl", "print", target], runner).returncode == 0
+    return False
 
 
 def _env_value(value: str) -> str:
@@ -95,26 +109,47 @@ def _ensure_env_file(paths: ServicePaths, settings: Settings) -> None:
     if settings.hindsight_api_llm_base_url:
         defaults["HINDSIGHT_API_LLM_BASE_URL"] = settings.hindsight_api_llm_base_url
     existing = paths.env_file.read_text(encoding="utf-8") if paths.env_file.exists() else ""
-    present = {
-        match.group(1)
-        for line in existing.splitlines()
-        if (match := re.match(r"\s*([A-Z0-9_]+)\s*=", line))
-    }
-    additions = [
-        f"{key}={_env_value(value)}"
-        for key, value in defaults.items()
-        if key not in present
-    ]
+    lines = existing.splitlines()
+    present: dict[str, tuple[int, bool]] = {}
+    for index, line in enumerate(lines):
+        match = re.match(r"\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$", line)
+        if not match:
+            continue
+        key, raw_value = match.groups()
+        try:
+            parsed = shlex.split(raw_value, comments=True, posix=True)
+        except ValueError:
+            parsed = [raw_value] if raw_value else []
+        present[key] = (index, bool(parsed and parsed[0]))
+
+    changed = False
+
+    def set_value(key: str, value: str) -> None:
+        nonlocal changed
+        encoded = f"{key}={_env_value(value)}"
+        current = present.get(key)
+        if current and current[1]:
+            return
+        if current:
+            index = current[0]
+            lines[index] = encoded
+        else:
+            index = len(lines)
+            lines.append(encoded)
+        present[key] = (index, True)
+        changed = True
+
     api_key = settings.hindsight_api_llm_api_key
     if api_key is None and settings.hindsight_api_llm_provider.casefold() == "openai":
         api_key = settings.openai_api_key
-    if "HINDSIGHT_API_LLM_API_KEY" not in present and api_key:
+    if api_key:
         secret = api_key.get_secret_value()
         if secret:
-            additions.append(f"HINDSIGHT_API_LLM_API_KEY={_env_value(secret)}")
-    if additions:
-        separator = "" if not existing or existing.endswith("\n") else "\n"
-        content = existing + separator + "\n".join(additions) + "\n"
+            set_value("HINDSIGHT_API_LLM_API_KEY", secret)
+    for key, value in defaults.items():
+        set_value(key, value)
+    if changed:
+        content = "\n".join(lines).rstrip() + "\n"
         temporary_path: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -147,6 +182,26 @@ def prepare_service_environment(
     return paths.env_file
 
 
+def service_environment_has_llm_key(home: Path | None = None) -> bool:
+    env_file = service_paths(home).env_file
+    try:
+        lines = env_file.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    has_key = False
+    for line in lines:
+        match = re.match(r"\s*(?:export\s+)?HINDSIGHT_API_LLM_API_KEY\s*=\s*(.*?)\s*$", line)
+        if not match:
+            continue
+        try:
+            values = shlex.split(match.group(1), comments=True, posix=True)
+        except ValueError:
+            has_key = False
+        else:
+            has_key = bool(values and values[0])
+    return has_key
+
+
 def _unit_contents(uvx: str) -> str:
     executable = '"' + uvx.replace("\\", "\\\\").replace('"', '\\"') + '"'
     return f"""[Unit]
@@ -164,6 +219,87 @@ RestartSec=3
 [Install]
 WantedBy=default.target
 """
+
+
+def _launch_agent_contents(env_file: Path, uvx: str, log_file: Path) -> bytes:
+    return plistlib.dumps(
+        {
+            "Label": HINDSIGHT_LAUNCHD_LABEL,
+            "ProgramArguments": [
+                sys.executable,
+                "-m",
+                "paper_rag.service_runner",
+                str(env_file),
+                uvx,
+            ],
+            "WorkingDirectory": str(env_file.parents[2]),
+            "RunAtLoad": True,
+            "KeepAlive": True,
+            "ThrottleInterval": 5,
+            "StandardOutPath": str(log_file),
+            "StandardErrorPath": str(log_file),
+        },
+        fmt=plistlib.FMT_XML,
+        sort_keys=True,
+    )
+
+
+def _install_launch_agent(
+    settings: Settings,
+    paths: ServicePaths,
+    uvx: str,
+    runner: Runner,
+) -> bool:
+    paths.launch_agent_file.parent.mkdir(parents=True, exist_ok=True)
+    paths.log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_descriptor = os.open(paths.log_file, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+    os.close(log_descriptor)
+    paths.log_file.chmod(0o600)
+    contents = _launch_agent_contents(paths.env_file, uvx, paths.log_file)
+    previous = paths.launch_agent_file.read_bytes() if paths.launch_agent_file.exists() else None
+    changed = previous != contents
+    target = f"gui/{os.getuid()}/{HINDSIGHT_LAUNCHD_LABEL}"
+    active = service_is_active(runner)
+
+    if active and not changed:
+        return False
+    if not active and hindsight_healthcheck(settings):
+        raise RuntimeError(
+            "Hindsight is already running outside the AMRB LaunchAgent. Stop that process before enabling managed startup."
+        )
+    if active:
+        result = _run(["launchctl", "bootout", target], runner)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "could not unload the existing Hindsight LaunchAgent")
+
+    if changed:
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=paths.launch_agent_file.parent,
+                prefix=f".{paths.launch_agent_file.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                os.fchmod(temporary.fileno(), 0o600)
+                temporary.write(contents)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_path, paths.launch_agent_file)
+        finally:
+            if temporary_path and temporary_path.exists():
+                temporary_path.unlink()
+    paths.launch_agent_file.chmod(0o600)
+
+    result = _run(
+        ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(paths.launch_agent_file)],
+        runner,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "could not load the Hindsight LaunchAgent")
+    return changed
 
 
 def _stop_existing_manual_server(
@@ -232,14 +368,19 @@ def install_user_service(
     runner: Runner = subprocess.run,
 ) -> bool:
     current = settings or get_settings()
-    if not systemd_user_available(runner):
-        raise RuntimeError("systemd --user is unavailable")
+    systemd_available = systemd_user_available(runner)
+    launchd_available = not systemd_available and launchd_user_available()
+    if not systemd_available and not launchd_available:
+        raise RuntimeError("systemd --user is unavailable and macOS launchd is unavailable")
     uvx = shutil.which("uvx")
     if uvx is None:
         raise RuntimeError("uvx was not found in PATH")
 
     paths = service_paths(home)
     prepare_service_environment(current, home)
+    if launchd_available:
+        return _install_launch_agent(current, paths, uvx, runner)
+
     paths.unit_file.parent.mkdir(parents=True, exist_ok=True)
     contents = _unit_contents(uvx)
     previous = paths.unit_file.read_text(encoding="utf-8") if paths.unit_file.exists() else None
@@ -277,9 +418,18 @@ def restart_service(
     timeout: float = 30.0,
     settings: Settings | None = None,
 ) -> None:
-    if not systemd_user_available(runner):
-        raise RuntimeError("systemd --user is unavailable")
-    result = _run(["systemctl", "--user", "restart", HINDSIGHT_SERVICE_NAME], runner)
+    if systemd_user_available(runner):
+        command = ["systemctl", "--user", "restart", HINDSIGHT_SERVICE_NAME]
+    elif launchd_user_available():
+        command = [
+            "launchctl",
+            "kickstart",
+            "-k",
+            f"gui/{os.getuid()}/{HINDSIGHT_LAUNCHD_LABEL}",
+        ]
+    else:
+        raise RuntimeError("systemd --user is unavailable and macOS launchd is unavailable")
+    result = _run(command, runner)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "could not restart the Hindsight service")
     deadline = time.monotonic() + timeout
@@ -297,24 +447,33 @@ def service_logs(
 ) -> str:
     if lines < 1 or lines > 1000:
         raise ValueError("日志行数必须在 1 到 1000 之间。")
-    if not systemd_user_available(runner):
-        raise RuntimeError("systemd --user is unavailable; no managed service logs exist")
-    result = _run(
-        [
-            "journalctl",
-            "--user",
-            "-u",
-            HINDSIGHT_SERVICE_NAME,
-            "-n",
-            str(lines),
-            "--no-pager",
-        ],
-        runner,
+    if systemd_user_available(runner):
+        result = _run(
+            [
+                "journalctl",
+                "--user",
+                "-u",
+                HINDSIGHT_SERVICE_NAME,
+                "-n",
+                str(lines),
+                "--no-pager",
+            ],
+            runner,
+        )
+        if result.returncode != 0:
+            message = redact_service_text(result.stderr.strip(), settings)
+            raise RuntimeError(message or "could not read Hindsight service logs")
+        return redact_service_text(result.stdout, settings)
+    if launchd_user_available():
+        log_file = service_paths().log_file
+        try:
+            output = "\n".join(log_file.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
+        except OSError as exc:
+            raise RuntimeError("No Hindsight LaunchAgent logs are available yet.") from exc
+        return redact_service_text(output, settings)
+    raise RuntimeError(
+        "systemd --user is unavailable and macOS launchd is unavailable; no managed service logs exist"
     )
-    if result.returncode != 0:
-        message = redact_service_text(result.stderr.strip(), settings)
-        raise RuntimeError(message or "could not read Hindsight service logs")
-    return redact_service_text(result.stdout, settings)
 
 
 def redact_service_text(text: str, settings: Settings | None = None) -> str:

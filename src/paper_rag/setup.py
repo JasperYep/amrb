@@ -6,8 +6,8 @@ import os
 import re
 import shlex
 import shutil
-import sys
 import subprocess
+import sys
 import tempfile
 import time
 import tomllib
@@ -43,8 +43,8 @@ from paper_rag.service import (
     HINDSIGHT_API_PORT,
     hindsight_healthcheck,
     install_user_service,
+    launchd_user_available,
     manual_hindsight_command,
-    service_paths,
     systemd_user_available,
 )
 
@@ -345,39 +345,54 @@ def write_environment_values(path: Path, values: dict[str, str]) -> tuple[str, .
     return tuple(changed)
 
 
-def _research_rules(settings: Settings) -> str:
-    name = settings.workspace_name.strip() or "this research workspace"
-    focus = settings.research_focus.strip()
-    focus_line = f"Current focus: {focus}\n\n" if focus else ""
-    return f'''# Research workflow
+def _workspace_rules(settings: Settings) -> str:
+    def profile_value(value: str) -> str:
+        return " ".join(value.split())
 
-Use this workspace for {name}.
-{focus_line}AMRB keeps paper evidence separate from the researcher's personal long-term research cognition. The MCP client remains responsible for conversation, reasoning, and tool choice.
+    name = profile_value(settings.workspace_name) or "this AMRB workspace"
+    domain = profile_value(settings.discipline)
+    purpose = profile_value(settings.research_focus)
+    source_scope = profile_value(settings.source_scope)
+    memory_policy = profile_value(settings.memory_policy)
+    profile = "\n".join(
+        line
+        for line in (
+            f"Domain: {domain}" if domain else "",
+            f"Purpose: {purpose}" if purpose else "",
+            f"Retrieval scope: {source_scope}" if source_scope else "",
+            f"Durable memory: {memory_policy}" if memory_policy else "",
+        )
+        if line
+    )
+    profile_section = f"\n{profile}\n" if profile else ""
+    return f'''# Workspace workflow
 
-## Evidence and memory
+Use AMRB for {name}.
+{profile_section}
+AMRB connects PDF retrieval with long-term workspace memory. The MCP client handles conversation, reasoning, and tool choice.
 
-- Use Paper RAG for claims about what papers define, propose, evaluate, or report. Read continuous PDF pages when search snippets are insufficient, and cite the paper and PDF page number.
-- Use Hindsight recall for a specific prior judgment or decision, and reflect when synthesizing multiple long-term judgments or their evolution.
-- Keep external paper evidence, remembered researcher judgments, and current analysis explicitly distinct.
-- A paper fact or retrieved passage does not become personal memory just because it was found.
-- A question, tentative discussion, or paper summary does not establish the researcher's view.
-- Retain only an explicitly stated or confirmed durable judgment, hypothesis, decision, concept, or stable preference. Do not retain ordinary questions, temporary tasks, or paper text.
-- When a current judgment revises an earlier one, mark the current view and preserve only useful history.
+## Retrieval and memory
+
+- Use Paper RAG for source claims from indexed PDFs. Read consecutive pages when snippets lack context and cite the source and PDF page.
+- Use Hindsight recall for specific prior workspace decisions or preferences, and reflect to synthesize their history.
+- Distinguish retrieved source evidence, remembered workspace knowledge, and current analysis.
+- Retain durable knowledge only when the user states or confirms it. Keep temporary questions and source text in their original context.
+- When a new decision revises an earlier one, mark the current decision and preserve useful history.
 
 ## Workspace operations
 
-Use the AMRB MCP for research evidence and memory. Use the `amrb` CLI or the `amrb-ops` skill for workspace maintenance, paper inventory, system status, and official infrastructure UI links. Do not treat Qdrant vector counts as a paper inventory or Hindsight synthesis as a complete memory listing.
+Use the AMRB MCP for retrieval and memory. Use the `amrb` CLI or the `amrb-ops` skill for workspace maintenance, document inventory, system status, and infrastructure links.
 '''
 
 
-def _mcp_launch_command(workspace_root: Path) -> tuple[str, list[str]]:
+def mcp_launch_command(workspace_root: Path) -> tuple[str, list[str]]:
     workspace = workspace_root.expanduser().resolve()
     executable = shutil.which("amrb-mcp")
     if executable:
         return str(Path(executable).resolve()), ["--workspace", str(workspace)]
     uv = shutil.which("uv")
     if not uv:
-        raise RuntimeError("Could not locate amrb-mcp or uv to generate a stable Codex MCP command.")
+        raise RuntimeError("Could not locate amrb-mcp or uv to generate a stable MCP launch command.")
     install_root = Path(__file__).resolve().parents[2]
     return str(Path(uv).resolve()), [
         "--directory",
@@ -389,7 +404,12 @@ def _mcp_launch_command(workspace_root: Path) -> tuple[str, list[str]]:
     ]
 
 
-def plan_workspace_client_files(root: Path, settings: Settings) -> tuple[WorkspaceFileChange, ...]:
+def plan_workspace_client_files(
+    root: Path,
+    settings: Settings,
+    *,
+    include_codex: bool = True,
+) -> tuple[WorkspaceFileChange, ...]:
     workspace_root = root.expanduser().resolve()
     changes: list[WorkspaceFileChange] = []
     rules_path = workspace_root / "AGENTS.md"
@@ -397,57 +417,58 @@ def plan_workspace_client_files(root: Path, settings: Settings) -> tuple[Workspa
         changes.append(
             WorkspaceFileChange(
                 path=rules_path,
-                content=_research_rules(settings),
-                summary="Create generic research collaboration rules; preserve existing rules when present.",
+                content=_workspace_rules(settings),
+                summary="Create workspace-specific retrieval and memory rules; preserve existing rules when present.",
                 existed=False,
             )
         )
 
-    config_path = workspace_root / ".codex" / "config.toml"
-    original = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
-    document = tomlkit.loads(original) if original.strip() else tomlkit.document()
-    servers = document.get("mcp_servers")
-    if servers is None:
-        servers = tomlkit.table()
-        document["mcp_servers"] = servers
-    if not isinstance(servers, MutableMapping):
-        raise ValueError("Codex config mcp_servers is not a table; setup left it unchanged.")
-    entry = servers.get("amrb")
-    if entry is None:
-        entry = tomlkit.table()
-        servers["amrb"] = entry
-    if not isinstance(entry, MutableMapping):
-        raise ValueError("Codex mcp_servers.amrb is not a table; setup left it unchanged.")
+    if include_codex:
+        config_path = workspace_root / ".codex" / "config.toml"
+        original = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+        document = tomlkit.loads(original) if original.strip() else tomlkit.document()
+        servers = document.get("mcp_servers")
+        if servers is None:
+            servers = tomlkit.table()
+            document["mcp_servers"] = servers
+        if not isinstance(servers, MutableMapping):
+            raise ValueError("Codex config mcp_servers is not a table; setup left it unchanged.")
+        entry = servers.get("amrb")
+        if entry is None:
+            entry = tomlkit.table()
+            servers["amrb"] = entry
+        if not isinstance(entry, MutableMapping):
+            raise ValueError("Codex mcp_servers.amrb is not a table; setup left it unchanged.")
 
-    command, arguments = _mcp_launch_command(workspace_root)
-    managed_values = {
-        "command": command,
-        "args": arguments,
-        "required": True,
-        "enabled_tools": [
-            "search_papers",
-            "list_papers",
-            "get_paper_pages",
-            "retain",
-            "recall",
-            "reflect",
-        ],
-        "startup_timeout_sec": 30,
-    }
-    changed_keys = [key for key, value in managed_values.items() if entry.get(key) != value]
-    if changed_keys:
-        for key in changed_keys:
-            entry[key] = managed_values[key]
-        changes.append(
-            WorkspaceFileChange(
-                path=config_path,
-                content=tomlkit.dumps(document),
-                summary="Set AMRB MCP launch path and workspace binding; update only "
-                + ", ".join(changed_keys)
-                + "; preserve other MCP servers and unknown AMRB fields.",
-                existed=config_path.exists(),
+        command, arguments = mcp_launch_command(workspace_root)
+        managed_values = {
+            "command": command,
+            "args": arguments,
+            "required": True,
+            "enabled_tools": [
+                "search_papers",
+                "list_papers",
+                "get_paper_pages",
+                "retain",
+                "recall",
+                "reflect",
+            ],
+            "startup_timeout_sec": 30,
+        }
+        changed_keys = [key for key, value in managed_values.items() if entry.get(key) != value]
+        if changed_keys:
+            for key in changed_keys:
+                entry[key] = managed_values[key]
+            changes.append(
+                WorkspaceFileChange(
+                    path=config_path,
+                    content=tomlkit.dumps(document),
+                    summary="Set AMRB MCP launch path and workspace binding; update only "
+                    + ", ".join(changed_keys)
+                    + "; preserve other MCP servers and unknown AMRB fields.",
+                    existed=config_path.exists(),
+                )
             )
-        )
     return tuple(changes)
 
 
@@ -485,15 +506,27 @@ def write_workspace_client_files(
                     temporary_path.unlink()
     except Exception as exc:
         completed = ", ".join(str(path) for path in written) or "none"
+        recovery = shlex.join(
+            [
+                "uv",
+                "--directory",
+                str(Path(__file__).resolve().parents[2]),
+                "run",
+                "amrb",
+                "setup",
+                "--workspace",
+                str(workspace_root),
+            ]
+        )
         raise RuntimeError(
-            f"Client setup stopped after writing {completed}. Each completed file is valid; rerun setup "
-            "to apply any remaining client changes."
+            f"Client setup stopped after writing {completed}. Each completed file is valid; "
+            f"rerun `{recovery}` to apply any remaining client changes."
         ) from exc
     return tuple(written)
 
 
 def verify_mcp_startup(workspace_root: Path, settings: Settings, timeout: float = 20.0) -> dict[str, Any]:
-    command, arguments = _mcp_launch_command(workspace_root)
+    command, arguments = mcp_launch_command(workspace_root)
     messages = [
         {
             "jsonrpc": "2.0",
@@ -547,7 +580,7 @@ def verify_mcp_startup(workspace_root: Path, settings: Settings, timeout: float 
         "reflect",
     ))
     if expected_names != tool_names:
-        raise RuntimeError("MCP tool enumeration did not match the configured research tool set.")
+        raise RuntimeError("MCP tool enumeration did not match the configured retrieval and memory tool set.")
     expected_binding = (settings.workspace_id, settings.qdrant_collection, settings.hindsight_bank_id)
     if not all(value in instructions for value in expected_binding):
         raise RuntimeError("MCP server initialized with an unexpected workspace binding.")
@@ -578,7 +611,11 @@ def setup_workspace(
         raise RuntimeError("AMRB requires Python 3.12 or newer.")
     uv_ready = shutil.which("uv") is not None
     if not uv_ready:
-        raise RuntimeError("uv was not found in PATH. Install uv and rerun `uv run amrb setup`.")
+        install_root = Path(__file__).resolve().parents[2]
+        command = shlex.join(
+            ["uv", "--directory", str(install_root), "run", "amrb", "setup", "--workspace", str(current.workspace_root)]
+        )
+        raise RuntimeError(f"uv was not found in PATH. Install uv, then rerun `{command}`.")
 
     if not _has_embedding_config(current):
         raise RuntimeError(
@@ -597,22 +634,15 @@ def setup_workspace(
         qdrant_client.close()
 
     notes: list[str] = []
-    service = service_paths()
-    service_already_configured = service.env_file.exists() or service.unit_file.exists()
     api_ready = hindsight_healthcheck(current)
-    if not api_ready and service_already_configured:
-        notes.append(
-            "An existing shared Hindsight service configuration was found, but its API is unavailable. "
-            "Setup left that service configuration unchanged; inspect it with `amrb service status`."
-        )
-    elif not api_ready and systemd_user_available():
+    if not api_ready and (systemd_user_available() or launchd_user_available()):
         install_user_service(current)
         if not _wait_for_hindsight(current):
             raise RuntimeError("Hindsight service started, but its API did not become ready.")
         api_ready = True
     elif not api_ready:
         notes.append(
-            "Hindsight automatic service setup unavailable. Start it manually with: "
+            "Hindsight automatic service setup is unavailable. Start it manually with: "
             + manual_hindsight_command(current)
         )
 

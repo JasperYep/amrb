@@ -1,79 +1,85 @@
-# AMRB Research Workspace MCP
+# AMRB — Agent Memory & Retrieval Bridge
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+English | [简体中文](README.zh-CN.md)
 
-AMRB connects a research project to one MCP server for paper evidence and long term research memory. The MCP client remains the conversation and reasoning interface; AMRB does not run an agent loop or provide a chat UI.
+An agent-agnostic MCP layer for retrieval and long-term memory.
+
+AMRB connects an MCP client to a workspace that combines PDF retrieval with persistent memory. The client handles conversation and reasoning; AMRB supplies retrieval, memory, and workspace operations.
 
 ```text
-MCP client ── AMRB ──┬── Paper RAG / Qdrant: external paper evidence
-                     └── Hindsight: researcher's long term judgments
+MCP client ── AMRB ──┬── PDF retrieval / Qdrant
+                     └── Long-term memory / Hindsight
 ```
 
-Each workspace represents one research project. Its `amrb.toml` stores nonsecret project identity and data targets. Its `.env` stores API keys and deployment connection settings. Different workspaces use different collections and Hindsight banks by default.
+Each workspace represents a project or knowledge area. It has its own retrieval collection and Hindsight memory bank. Setup records a compact profile covering its domain, purpose, source scope, and durable memory policy, then creates a stable `AGENTS.md` when the workspace has no existing one.
 
-## Install and initialize
+## Set up
 
-Install AMRB once, then initialize a workspace in the research project directory:
+Install AMRB once, then initialize the target workspace:
 
 ```bash
 git clone https://github.com/JasperYep/amrb.git
 cd amrb
 uv sync --locked
-uv run amrb setup --workspace /absolute/path/to/research-project
+uv run amrb setup --workspace /absolute/path/to/workspace
 ```
 
-When running from source, the equivalent command is:
+From another directory, use:
 
 ```bash
-uv --directory /absolute/path/to/amrb run amrb setup --workspace /absolute/path/to/research-project
+uv --directory /absolute/path/to/amrb run amrb setup --workspace /absolute/path/to/workspace
 ```
 
-Setup asks for the project name, field, optional research focus, embedding endpoint and key, and whether to use local or remote Qdrant. Optional Hindsight Control Plane and remote Qdrant Dashboard URLs can also be entered; setup probes configured links. API keys and URLs are entered in hidden terminal prompts, never in the MCP conversation. It creates `amrb.toml`, a user-only `.env`, a Codex MCP entry, and—only when absent—a generic `AGENTS.md` research policy. Existing `AGENTS.md`, other MCP entries, and unknown Codex config fields are preserved.
+Ask the agent: “Set up AMRB and connect it to this agent.”
 
-For scripts, provide required settings through process environment or the workspace `.env` and use:
+Setup collects the project name, domain, workspace purpose, retrieval scope, memory policy, embedding model and endpoint, API key, and Qdrant location. It configures a shared Hindsight service when needed. Endpoint URLs are visible in the terminal and setup review; API keys use hidden prompts. Setup writes `amrb.toml`, a user-only `.env`, and the selected client configuration. It creates `AGENTS.md` only when the workspace does not already have one.
+
+The saved workspace profile is also included in the MCP server's initialization instructions, so connected agents receive the same context through their client.
+
+Codex configuration is written by default. For another MCP client, pass `--skip-codex-config`; setup prints the exact `command` and `args` to add to the active client's settings. The same stdio server works with any MCP-compatible agent.
+
+On macOS, AMRB manages Hindsight with a user LaunchAgent. On Linux, it uses `systemd --user`. The service reads credentials from the owner-only `~/.config/amrb/hindsight.env` file.
+
+For scripted setup, provide required settings through the process environment or workspace `.env`:
 
 ```bash
 uv --directory /absolute/path/to/amrb run amrb setup \
-  --workspace /absolute/path/to/research-project \
-  --name "Research project" --discipline "Your field" --non-interactive
+  --workspace /absolute/path/to/workspace \
+  --name "Project name" --domain "Project domain" \
+  --purpose "Workspace purpose" \
+  --source-scope "PDF collection to retrieve from" \
+  --memory-policy "Durable knowledge to retain" --non-interactive
 ```
 
-If setup detects existing unconfigured papers or index data, explicitly pass `--adopt-legacy` after checking the configured targets. An old index without model and chunk metadata remains unverified until its configuration is inspected and confirmed with `--accept-legacy-index`. Setup preserves the old paper IDs, manifest, collection, bank, and shared Hindsight service.
+## Retrieval and memory
 
-Workspace configs record the path where their identity was initialized. If a config is copied or moved, setup asks whether to keep the existing collection and bank (`--copied-identity reuse`) or create a new identity (`--copied-identity new`). A new identity selects a separate collection, bank, and local Qdrant directory; it archives the copied manifest and leaves PDFs and prior vector files in place without reindexing. A populated collection or existing Hindsight bank with unknown ownership requires explicit confirmation with `--adopt-existing-resources`.
+The retrieval layer indexes PDFs with Qdrant. Its MCP tools search the collection, list indexed documents, and read consecutive PDF pages. Search results include the source and PDF page order.
 
-## MCP clients
+Hindsight stores durable workspace knowledge in a separate bank. `retain` records explicit decisions, hypotheses, concepts, and preferences. `recall` retrieves prior knowledge; `reflect` synthesizes its history. Workspace instructions define how the active agent uses these tools.
 
-Codex is the reference onboarding client. Setup writes a workspace-bound stdio command to `.codex/config.toml`; the command pins both the AMRB installation and workspace paths, so MCP startup does not depend on the client's current directory. Other MCP clients can launch the same server:
+AMRB supports one workspace per project or knowledge area. Workspace identity and profile live in `amrb.toml`; API keys and service connection settings live in `.env`. The generated workspace policy stays stable between ordinary sessions, keeping the agent's context prefix consistent. When the workspace purpose changes, update the profile in `amrb.toml` and its instructions in `AGENTS.md`.
+
+## Connect other MCP clients
+
+Run the server directly with the target workspace:
 
 ```bash
-uv --directory /absolute/path/to/amrb run amrb-mcp --workspace /absolute/path/to/research-project
+uv --directory /absolute/path/to/amrb run amrb-mcp --workspace /absolute/path/to/workspace
 ```
 
-The MCP provides `search_papers`, `list_papers`, `get_paper_pages`, `retain`, `recall`, and `reflect`. Paper results identify the paper, retrieval method, and PDF page order. Hindsight tools are bound to the workspace bank at server startup; they do not accept a project or bank selector on each call.
+Setup also prints a machine-readable launch configuration. Add its `command` and `args` to the MCP settings used by the active client, then reconnect the client.
 
 ## Inspect and maintain
 
 ```bash
-uv --directory /absolute/path/to/amrb run amrb --workspace /absolute/path/to/research-project status --json
-uv --directory /absolute/path/to/amrb run amrb --workspace /absolute/path/to/research-project doctor --json
-uv --directory /absolute/path/to/amrb run amrb --workspace /absolute/path/to/research-project paper list --json
-uv --directory /absolute/path/to/amrb run amrb --workspace /absolute/path/to/research-project paper add ~/Downloads/paper.pdf
-uv --directory /absolute/path/to/amrb run amrb --workspace /absolute/path/to/research-project paper sync
+uv --directory /absolute/path/to/amrb run amrb --workspace /absolute/path/to/workspace status --json
+uv --directory /absolute/path/to/amrb run amrb --workspace /absolute/path/to/workspace doctor --json
+uv --directory /absolute/path/to/amrb run amrb --workspace /absolute/path/to/workspace paper list --json
+uv --directory /absolute/path/to/amrb run amrb --workspace /absolute/path/to/workspace paper add ~/Downloads/document.pdf
+uv --directory /absolute/path/to/amrb run amrb --workspace /absolute/path/to/workspace paper sync
+uv --directory /absolute/path/to/amrb run amrb --workspace /absolute/path/to/workspace service status --json
 ```
 
-`paper list` shows each PDF's title, page count, stable paper ID, and whether it is indexed, not indexed, changed since indexing, missing, failed, or unverified. JSON output is intended for scripts. `status` and `doctor` show workspace, bank, collection, paper, chunk, and service state.
+`paper list` reports each PDF's title, page count, stable ID, and index state. `status` and `doctor` report workspace identity, collection, memory bank, document and chunk counts, and service health.
 
-Hindsight Control Plane is the official interface for inspecting memory. Qdrant Dashboard is an infrastructure view for remote Qdrant and does not replace the paper inventory or retrieval results. These vendor interfaces may permit writes or deletion; opening them does not make them read only. A local embedded Qdrant store has no server Dashboard to open.
-
-AMRB does not automatically import PDFs, retain conversation history, or turn retrieved paper evidence into personal memory. Workspace collaboration rules govern when to use Paper RAG and Hindsight; they do not enforce write authorization at the MCP server.
-
-## Configuration
-
-`amrb.toml` contains the workspace ID, project description, paper directory, embedding model and chunking profile, Qdrant collection, and Hindsight bank. The workspace ID is generated once; renaming the project does not change data identity. Relative data paths resolve from the workspace root.
-
-`.env` contains keys and service connection values and is excluded from version control. Generated secret files use owner-only permissions. Workspace identity and the recorded embedding/chunk profile come from `amrb.toml`; deployment values resolve as process environment, workspace `.env`, then defaults. AMRB does not load an `.env` from its installation directory.
-
-Hindsight is a shared user service. A new workspace reuses a healthy service and gets a separate bank. Setup does not rewrite service credentials, restart a healthy shared service, or replace missions in an existing bank.
-
-If a bank already exists, setup shows any mission differences and asks before updating them. In scripts, use `--update-missions` only after reviewing the proposed workspace missions. Service logs redact configured keys and service URLs. If a setup step fails, its message reports what was saved and how to resume.
+Hindsight Control Plane displays memory entries. Qdrant Dashboard displays remote vector infrastructure. Setup can record these URLs and check reachability. Local embedded Qdrant stores vectors in the workspace and has no server dashboard.

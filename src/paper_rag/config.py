@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import tempfile
 import tomllib
 from pathlib import Path
@@ -44,9 +45,11 @@ class Settings(BaseSettings):
     workspace_root: Path = PROJECT_ROOT
     workspace_bound_path: Path | None = None
     workspace_id: str = "uninitialized-workspace"
-    workspace_name: str = "Research workspace"
+    workspace_name: str = "AMRB workspace"
     discipline: str = ""
     research_focus: str = ""
+    source_scope: str = ""
+    memory_policy: str = ""
     papers_directory: Path = Path("papers")
     embedding_provider: Literal["openai"] = "openai"
     embedding_model: str = "text-embedding-3-small"
@@ -68,7 +71,7 @@ class Settings(BaseSettings):
     qdrant_api_key: SecretStr | None = None
     qdrant_collection: str = "amrb_papers"
     qdrant_resource_accepted: bool = False
-    hindsight_bank_id: str = "amrb-research"
+    hindsight_bank_id: str = "amrb-memory"
     hindsight_resource_accepted: bool = False
     legacy_data_compatibility: bool = False
     embedding_dimension: int | None = None
@@ -129,7 +132,22 @@ def find_workspace_root(start: Path | None = None) -> Path:
         if (candidate / "amrb.toml").is_file():
             return candidate
     raise FileNotFoundError(
-        f"No amrb.toml found from {current}. Initialize this project with `amrb setup --workspace {current}`."
+        f"No amrb.toml found from {current}. Initialize it with `{_setup_command(current)}`."
+    )
+
+
+def _setup_command(workspace_root: Path) -> str:
+    return shlex.join(
+        [
+            "uv",
+            "--directory",
+            str(PROJECT_ROOT),
+            "run",
+            "amrb",
+            "setup",
+            "--workspace",
+            str(workspace_root),
+        ]
     )
 
 
@@ -159,7 +177,11 @@ def _settings_from_toml(path: Path) -> dict[str, object]:
             "bound_path": "workspace_bound_path",
             "name": "workspace_name",
             "discipline": "discipline",
+            "domain": "discipline",
             "research_focus": "research_focus",
+            "purpose": "research_focus",
+            "source_scope": "source_scope",
+            "memory_policy": "memory_policy",
             "legacy_data_compatibility": "legacy_data_compatibility",
         }),
         (papers, {"directory": "papers_directory"}),
@@ -207,7 +229,7 @@ def load_settings(workspace_root: Path, *, allow_copied_workspace: bool = False)
     config_path = root / "amrb.toml"
     if not config_path.is_file():
         raise FileNotFoundError(
-            f"Workspace is not initialized: {config_path}. Run `amrb setup --workspace {root}`."
+            f"Workspace is not initialized: {config_path}. Run `{_setup_command(root)}`."
         )
     values = _settings_from_toml(config_path)
     bound_path = values.get("workspace_bound_path")
@@ -232,6 +254,8 @@ def load_settings(workspace_root: Path, *, allow_copied_workspace: bool = False)
         "workspace_name",
         "discipline",
         "research_focus",
+        "source_scope",
+        "memory_policy",
         "papers_directory",
         "qdrant_path",
         "qdrant_collection",
@@ -269,6 +293,8 @@ def initialize_workspace_config(
     name: str,
     discipline: str = "",
     research_focus: str = "",
+    source_scope: str = "",
+    memory_policy: str = "",
     embedding_provider: str | None = None,
     embedding_model: str | None = None,
     chunk_size: int | None = None,
@@ -323,7 +349,9 @@ def initialize_workspace_config(
         f"bound_path = {quote(str(root))}",
         f"name = {quote(name.strip())}",
         f"discipline = {quote(discipline.strip())}",
-        f"research_focus = {quote(research_focus.strip())}",
+        f"purpose = {quote(research_focus.strip())}",
+        f"source_scope = {quote(source_scope.strip())}",
+        f"memory_policy = {quote(memory_policy.strip())}",
     ]
     if adopt_legacy:
         lines.append("legacy_data_compatibility = true")

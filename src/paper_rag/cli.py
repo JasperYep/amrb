@@ -67,7 +67,9 @@ def status() -> None:
 
 @app.command()
 def search(
-    query: str = typer.Argument(..., help="Research question or terms to search for."),
+    query: str = typer.Argument(
+        ..., help="Question or terms to search for in indexed documents."
+    ),
     top_k: int | None = typer.Option(None, min=1, max=100),
     paper: str | None = typer.Option(None, help="Restrict search to a paper title, file, or ID."),
 ) -> None:

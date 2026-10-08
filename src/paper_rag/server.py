@@ -28,7 +28,7 @@ def search_papers(
     top_k: int | None = None,
     paper: str | None = None,
 ) -> list[PaperHit]:
-    """Search the current research workspace's indexed papers for external evidence. Use this for claims about what papers say, propose, evaluate, or report; personal research judgments belong in the workspace memory tools."""
+    """Search PDFs indexed in the current workspace and return source passages as external evidence."""
     return retrieve_papers(
         query=query,
         top_k=top_k,
@@ -39,7 +39,7 @@ def search_papers(
 
 @mcp.tool()
 def list_papers() -> list[PaperBrief]:
-    """List papers recorded in the current research workspace's index."""
+    """List PDF documents recorded in the current workspace's retrieval index."""
     return read_papers(settings=_workspace_settings())
 
 
@@ -49,7 +49,7 @@ def get_paper_pages(
     start_page: int,
     end_page: int | None = None,
 ) -> list[PaperPage]:
-    """Read up to ten consecutive PDF pages from an indexed paper when search snippets are insufficient for interpretation or citation. Page numbers refer to PDF page order."""
+    """Read up to ten consecutive pages from an indexed PDF. Page numbers refer to PDF page order."""
     return read_paper_pages(
         paper_id=paper_id,
         start_page=start_page,
@@ -75,7 +75,7 @@ async def retain(
     timestamp: str | None = None,
     tags: list[str] | None = None,
 ) -> str:
-    """Save the researcher's durable judgments, hypotheses, decisions, and stable preferences to this workspace's memory bank. Do not retain paper facts, retrieved passages, questions, tentative discussion, routine answers, or temporary tasks as the researcher's views. When a new judgment revises an older one, identify the current view and retain only useful history."""
+    """Save explicit, durable workspace knowledge such as decisions, hypotheses, concepts, and stable preferences. Keep source passages, temporary questions, and routine task details in their original context. When a decision changes, identify the current version and preserve useful history."""
     arguments: dict[str, Any] = {"content": content, "context": context}
     if timestamp is not None:
         arguments["timestamp"] = timestamp
@@ -92,7 +92,7 @@ async def recall(
     prefer_observations: bool = False,
     tags: list[str] | None = None,
 ) -> str:
-    """Recall the researcher's prior judgments from this workspace's memory bank. Use for questions about what the researcher previously thought or decided, not for claims about paper contents."""
+    """Recall prior knowledge, decisions, and preferences from this workspace's memory bank."""
     arguments: dict[str, Any] = {
         "query": query,
         "max_tokens": max_tokens,
@@ -112,7 +112,7 @@ async def reflect(
     max_tokens: int = 4096,
     tags: list[str] | None = None,
 ) -> str:
-    """Synthesize the researcher's longer-term understanding from this workspace's memory bank. Separate remembered judgments from your current synthesis; neither is paper evidence."""
+    """Synthesize durable knowledge from this workspace's memory bank and distinguish recalled content from current analysis."""
     arguments: dict[str, Any] = {
         "query": query,
         "budget": budget,
@@ -126,7 +126,7 @@ async def reflect(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="AMRB research workspace MCP server")
+    parser = argparse.ArgumentParser(description="AMRB retrieval and memory MCP server")
     parser.add_argument(
         "--workspace",
         type=Path,
@@ -152,9 +152,21 @@ def main() -> None:
             )
     global _BOUND_SETTINGS
     _BOUND_SETTINGS = settings
+    profile_fields = (
+        ("Domain", settings.discipline),
+        ("Purpose", settings.research_focus),
+        ("Retrieval scope", settings.source_scope),
+        ("Durable memory", settings.memory_policy),
+    )
+    profile = "\n".join(
+        f"{label}: {' '.join(value.split())}"
+        for label, value in profile_fields
+        if value.strip()
+    )
     mcp._lowlevel_server.instructions = (
-        f"Bound to research workspace {settings.workspace_name} ({settings.workspace_id}). "
-        f"Paper collection: {settings.qdrant_collection}. Memory bank: {settings.hindsight_bank_id}. "
-        "Paper evidence and the researcher's personal memory are separate sources."
+        f"Bound to workspace {settings.workspace_name} ({settings.workspace_id}). "
+        f"Retrieval collection: {settings.qdrant_collection}. Memory bank: {settings.hindsight_bank_id}. "
+        + (f"\nWorkspace profile:\n{profile}\n" if profile else "")
+        + "Retrieved source content and durable workspace memory are separate sources."
     )
     mcp.run(transport="stdio")

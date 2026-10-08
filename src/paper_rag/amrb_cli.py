@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import sys
 import uuid
 import webbrowser
@@ -23,7 +24,6 @@ from paper_rag.config import (
     get_settings,
     initialize_workspace_config,
     load_settings,
-    load_settings,
     redact_sensitive_text,
 )
 from paper_rag.health import get_system_status, run_doctor, _check_bank, _check_embedding
@@ -37,8 +37,10 @@ from paper_rag.ops import (
 )
 from paper_rag.service import (
     hindsight_healthcheck,
+    launchd_user_available,
     redact_service_text,
     restart_service,
+    service_environment_has_llm_key,
     service_is_active,
     service_logs,
     service_paths,
@@ -51,6 +53,7 @@ from paper_rag.setup import (
     accept_legacy_index,
     inspect_qdrant_resource,
     inspect_legacy_index,
+    mcp_launch_command,
     plan_workspace_client_files,
     setup_workspace,
     resolve_copied_workspace_identity,
@@ -59,7 +62,7 @@ from paper_rag.setup import (
     write_workspace_client_files,
 )
 
-app = typer.Typer(no_args_is_help=True, help="Research workspace operations.")
+app = typer.Typer(no_args_is_help=True, help="Retrieval and memory workspace operations.")
 paper_app = typer.Typer(no_args_is_help=True)
 batch_app = typer.Typer(no_args_is_help=True)
 service_app = typer.Typer(no_args_is_help=True)
@@ -77,7 +80,7 @@ def configure_logging(
     workspace: Path | None = typer.Option(
         None,
         "--workspace",
-        help="Use this initialized research workspace (defaults to the nearest amrb.toml).",
+        help="Use this initialized workspace (defaults to the nearest amrb.toml).",
     ),
 ) -> None:
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s", force=True)
@@ -201,6 +204,24 @@ def _valid_web_url(url: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
 
 
+def _uv_amrb_command(*args: str) -> str:
+    """Build a recovery command that works from any directory for source installs."""
+    source_root = next(
+        (
+            parent
+            for parent in Path(__file__).resolve().parents
+            if (parent / "pyproject.toml").is_file()
+            and (parent / "src" / "paper_rag").is_dir()
+        ),
+        None,
+    )
+    command = ["uv"]
+    if source_root is not None:
+        command.extend(("--directory", str(source_root)))
+    command.extend(("run", "amrb", *args))
+    return shlex.join(command)
+
+
 def _workspace_has_legacy_data(root: Path) -> bool:
     return (
         (root / ".env").is_file()
@@ -215,6 +236,8 @@ def _setup_workspace_config(
     name: str | None,
     discipline: str | None,
     research_focus: str | None,
+    source_scope: str | None,
+    memory_policy: str | None,
     non_interactive: bool,
     adopt_legacy: bool,
     copied_identity: str | None,
@@ -284,13 +307,15 @@ def _setup_workspace_config(
         raise ValueError("--copied-identity applies only when amrb.toml is bound to another path.")
 
     if config_exists:
-        if name or discipline or research_focus:
+        if name or discipline or research_focus or source_scope or memory_policy:
             raise ValueError("Workspace metadata is persistent; edit amrb.toml explicitly to rename or retarget it.")
         current = current or load_settings(root)
         is_legacy = False
         selected_name = current.workspace_name
         selected_discipline = current.discipline
         selected_focus = current.research_focus
+        selected_source_scope = current.source_scope
+        selected_memory_policy = current.memory_policy
     else:
         is_legacy = _workspace_has_legacy_data(root)
         if non_interactive and not name:
@@ -309,13 +334,21 @@ def _setup_workspace_config(
             selected_name = name or ""
             selected_discipline = discipline or ""
             selected_focus = research_focus or ""
+            selected_source_scope = source_scope or ""
+            selected_memory_policy = memory_policy or ""
         else:
-            selected_name = name or typer.prompt("Research project name", default=root.name)
+            selected_name = name or typer.prompt("Workspace name", default=root.name)
             selected_discipline = discipline if discipline is not None else typer.prompt(
-                "Discipline or research area", default="", show_default=False
+                "Project domain or area", default="", show_default=False
             )
             selected_focus = research_focus if research_focus is not None else typer.prompt(
-                "Research focus (optional)", default="", show_default=False
+                "Workspace purpose or focus (optional)", default="", show_default=False
+            )
+            selected_source_scope = source_scope if source_scope is not None else typer.prompt(
+                "Source collection or scope (optional)", default="", show_default=False
+            )
+            selected_memory_policy = memory_policy if memory_policy is not None else typer.prompt(
+                "Durable knowledge to remember (optional)", default="", show_default=False
             )
         current = Settings(
             _env_file=root / ".env",
@@ -336,14 +369,20 @@ def _setup_workspace_config(
                 "Non-interactive setup is missing required settings: " + ", ".join(missing)
             )
     else:
+        if not config_exists:
+            selected_embedding_model = typer.prompt(
+                "Embedding model",
+                default=current.embedding_model,
+            )
         if not current.embedding_base_url:
-            env_values["EMBEDDING_BASE_URL"] = typer.prompt(
+            embedding_base_url = typer.prompt(
                 "OpenAI-compatible embedding endpoint",
                 default="https://api.openai.com/v1",
-                hide_input=True,
             )
+            if not _valid_web_url(embedding_base_url):
+                raise ValueError("Embedding endpoint must be an http:// or https:// URL.")
+            env_values["EMBEDDING_BASE_URL"] = embedding_base_url
         if not current.embedding_api_key or not current.embedding_api_key.get_secret_value():
-            selected_embedding_model = typer.prompt("Embedding model", default=current.embedding_model)
             api_key = typer.prompt("Embedding API key", hide_input=True)
             if not api_key:
                 raise ValueError("Embedding API key is required.")
@@ -354,17 +393,18 @@ def _setup_workspace_config(
         if mode not in {"local", "remote"}:
             raise ValueError("Choose either local or remote Qdrant storage.")
         if mode == "remote":
-            remote_url = typer.prompt("Qdrant URL (input hidden)", hide_input=True)
+            remote_url = typer.prompt("Qdrant URL")
             remote_key = typer.prompt("Qdrant API key (optional, input hidden)", hide_input=True, default="")
             if not remote_url:
                 raise ValueError("A Qdrant URL is required for remote storage.")
+            if not _valid_web_url(remote_url):
+                raise ValueError("Qdrant URL must be an http:// or https:// URL.")
             env_values["QDRANT_URL"] = remote_url
             if remote_key:
                 env_values["QDRANT_API_KEY"] = remote_key
             if not current.qdrant_dashboard_url:
                 dashboard = typer.prompt(
-                    "Qdrant Dashboard URL (optional; hidden input)",
-                    hide_input=True,
+                    "Qdrant Dashboard URL (optional)",
                     default="",
                 )
                 if dashboard:
@@ -374,8 +414,7 @@ def _setup_workspace_config(
 
     if current.qdrant_url and not current.qdrant_dashboard_url and not non_interactive:
         dashboard = typer.prompt(
-            "Qdrant Dashboard URL (optional; hidden input)",
-            hide_input=True,
+            "Qdrant Dashboard URL (optional)",
             default="",
         )
         if dashboard:
@@ -385,8 +424,7 @@ def _setup_workspace_config(
 
     if not current.hindsight_ui_url and not non_interactive:
         hindsight_ui = typer.prompt(
-            "Hindsight Control Plane URL (optional; hidden input)",
-            hide_input=True,
+            "Hindsight Control Plane URL (optional)",
             default="",
         )
         if hindsight_ui:
@@ -395,12 +433,30 @@ def _setup_workspace_config(
             env_values["HINDSIGHT_UI_URL"] = hindsight_ui
 
     shared_service = service_paths()
-    configure_shared_service = (
-        not hindsight_healthcheck(current)
-        and not shared_service.env_file.exists()
-        and not shared_service.unit_file.exists()
-        and not current.hindsight_api_llm_api_key
-        and not current.openai_api_key
+    hindsight_is_ready = hindsight_healthcheck(current)
+    current_llm_keys = (current.hindsight_api_llm_api_key, current.openai_api_key)
+    has_current_llm_key = any(
+        key is not None and bool(key.get_secret_value()) for key in current_llm_keys
+    )
+    has_shared_llm_key = service_environment_has_llm_key() or has_current_llm_key
+    configure_shared_service = not hindsight_is_ready and not has_shared_llm_key
+    systemd_available = systemd_user_available()
+    launchd_available = not systemd_available and launchd_user_available()
+    managed_service_file = (
+        shared_service.unit_file
+        if systemd_available
+        else shared_service.launch_agent_file
+        if launchd_available
+        else None
+    )
+    install_shared_service = (
+        managed_service_file is not None
+        and not hindsight_is_ready
+        and not (
+            shared_service.env_file.exists()
+            and service_environment_has_llm_key()
+            and managed_service_file.exists()
+        )
     )
     if configure_shared_service:
         if non_interactive:
@@ -419,47 +475,78 @@ def _setup_workspace_config(
         if base_url:
             env_values["HINDSIGHT_API_LLM_BASE_URL"] = base_url
 
-    root.mkdir(parents=True, exist_ok=True)
     config_path = root / "amrb.toml"
     planned_files = [str(config_path)] if not config_exists else []
     if env_values:
         planned_files.append(f"{root / '.env'} (keys: {', '.join(sorted(env_values))}; values hidden)")
-    if configure_shared_service:
+    if configure_shared_service or install_shared_service:
         planned_files.append(
             f"{shared_service.env_file} (owner-only shared Hindsight service environment; affects all workspaces)"
         )
-        if systemd_user_available():
-            planned_files.append(f"{shared_service.unit_file} (managed shared Hindsight service)")
+        if install_shared_service and managed_service_file:
+            planned_files.append(f"{managed_service_file} (managed shared Hindsight service)")
+    if not non_interactive:
+        embedding_endpoint = env_values.get("EMBEDDING_BASE_URL") or current.embedding_base_url or "https://api.openai.com/v1"
+        qdrant_url = env_values.get("QDRANT_URL") or current.qdrant_url
+        hindsight_endpoint = (
+            env_values.get("HINDSIGHT_API_LLM_BASE_URL")
+            or current.hindsight_api_llm_base_url
+        )
+        console.print("Setup review:")
+        console.print(f"  Path: {root}")
+        console.print(f"  Workspace: {selected_name} ({selected_discipline or 'domain not set'})")
+        if selected_focus:
+            console.print(f"  Purpose: {selected_focus}")
+        if selected_source_scope:
+            console.print(f"  Retrieval scope: {selected_source_scope}")
+        if selected_memory_policy:
+            console.print(f"  Memory policy: {selected_memory_policy}")
+        console.print(f"  Embedding: {selected_embedding_model} at {embedding_endpoint}")
+        console.print(f"  Qdrant: {qdrant_url if qdrant_url else 'local storage'}")
+        console.print(
+            "  Hindsight LLM: "
+            f"{env_values.get('HINDSIGHT_API_LLM_PROVIDER', current.hindsight_api_llm_provider)} / "
+            f"{env_values.get('HINDSIGHT_API_LLM_MODEL', current.hindsight_api_llm_model)}"
+            + (f" at {hindsight_endpoint}" if hindsight_endpoint else "")
+        )
+        console.print("  API keys: hidden")
     if planned_files:
-        console.print("Setup will write:")
+        console.print("Setup will create or update:")
         for path in planned_files:
             console.print(f"  {path}")
         if not non_interactive and not typer.confirm("Write these workspace and service settings?", default=False):
             raise ValueError("Workspace setup canceled; no files were written.")
 
     changed_keys: tuple[str, ...] = ()
+    config_created = False
     try:
-        if env_values:
-            changed_keys = write_environment_values(root / ".env", env_values)
         if not config_exists:
-            current, _ = initialize_workspace_config(
+            current, config_created = initialize_workspace_config(
                 root,
                 name=selected_name,
                 discipline=selected_discipline,
                 research_focus=selected_focus,
+                source_scope=selected_source_scope,
+                memory_policy=selected_memory_policy,
                 embedding_provider=current.embedding_provider,
                 embedding_model=selected_embedding_model,
                 chunk_size=current.rag_chunk_size,
                 chunk_overlap=current.rag_chunk_overlap,
                 adopt_legacy=adopt_legacy,
             )
-        else:
-            current = load_settings(root)
+        if env_values:
+            changed_keys = write_environment_values(root / ".env", env_values)
+        current = load_settings(root)
     except Exception as exc:
-        completed = ".env keys: " + ", ".join(changed_keys) if changed_keys else "none"
+        completed: list[str] = []
+        if config_created:
+            completed.append(str(config_path))
+        if changed_keys:
+            completed.append(".env keys: " + ", ".join(changed_keys))
+        changed = "Completed: " + "; ".join(completed) + "." if completed else "No setup files were updated."
         raise RuntimeError(
-            f"Workspace setup stopped after updating {completed}. Existing files were preserved; "
-            "rerun `amrb setup` after correcting the reported issue."
+            f"Workspace setup failed: {exc}. {changed} "
+            f"Resume with `{_uv_amrb_command('setup', '--workspace', str(root))}`."
         ) from exc
     return current, not config_exists, is_legacy, copy_action
 
@@ -491,20 +578,42 @@ def setup(
     workspace: Path | None = typer.Option(
         None,
         "--workspace",
-        help="Initialize or configure this research workspace.",
+        help="Initialize or configure this retrieval and memory workspace.",
     ),
-    name: str | None = typer.Option(None, "--name", help="Project name for a new workspace."),
-    discipline: str | None = typer.Option(None, "--discipline", help="Field or research area."),
-    research_focus: str | None = typer.Option(None, "--research-focus", help="Short optional research focus."),
+    name: str | None = typer.Option(None, "--name", help="Project or workspace name."),
+    discipline: str | None = typer.Option(
+        None,
+        "--domain",
+        "--discipline",
+        help="Project domain or knowledge area.",
+    ),
+    research_focus: str | None = typer.Option(
+        None,
+        "--purpose",
+        "--research-focus",
+        help="Workspace purpose or context.",
+    ),
+    source_scope: str | None = typer.Option(
+        None,
+        "--source-scope",
+        "--sources",
+        help="PDF collection or source scope this workspace should retrieve from.",
+    ),
+    memory_policy: str | None = typer.Option(
+        None,
+        "--memory-policy",
+        help="Durable knowledge this workspace should retain.",
+    ),
     non_interactive: bool = typer.Option(False, "--non-interactive", help="Never prompt; missing values fail."),
     adopt_legacy: bool = typer.Option(False, "--adopt-legacy", help="Explicitly preserve data in an existing unconfigured directory."),
     copied_identity: str | None = typer.Option(None, "--copied-identity", help="For a copied workspace choose 'reuse' or 'new'."),
     confirm_legacy_index: bool = typer.Option(False, "--accept-legacy-index", help="Confirm that the current model and chunk settings match an existing unverified index."),
     adopt_existing_resources: bool = typer.Option(False, "--adopt-existing-resources", help="Confirm that this workspace may use an existing Qdrant collection or Hindsight bank with unknown ownership."),
+    skip_codex_config: bool = typer.Option(False, "--skip-codex-config", help="Do not write .codex/config.toml; use the printed MCP launch details with another client."),
     update_missions: bool = typer.Option(False, "--update-missions", help="Apply the generated mission changes to an existing Hindsight bank."),
     verify_embedding: bool = typer.Option(False, "--verify-embedding", help="Send one minimal embedding request; provider usage may be billable."),
 ) -> None:
-    """Initialize or validate workspace configuration and research services."""
+    """Initialize or validate a retrieval and memory workspace."""
     explicit_workspace = workspace or (
         Path(os.environ["AMRB_WORKSPACE"]) if os.environ.get("AMRB_WORKSPACE") else None
     )
@@ -523,6 +632,8 @@ def setup(
             name=name,
             discipline=discipline,
             research_focus=research_focus,
+            source_scope=source_scope,
+            memory_policy=memory_policy,
             non_interactive=no_prompts,
             adopt_legacy=adopt_legacy,
             copied_identity=copied_identity,
@@ -651,7 +762,13 @@ def setup(
                 else:
                     notes.append("Existing Hindsight missions will remain unchanged.")
 
-    client_changes = _run(lambda: plan_workspace_client_files(root, current))
+    if skip_codex_config:
+        client_changes = _run(
+            lambda: plan_workspace_client_files(root, current, include_codex=False)
+        )
+        notes.append("Codex MCP configuration was skipped; use the printed launch details with the active client.")
+    else:
+        client_changes = _run(lambda: plan_workspace_client_files(root, current))
     if client_changes:
         console.print("Client setup preview:")
         for change in client_changes:
@@ -691,9 +808,10 @@ def setup(
         )
 
     recovery = (
-        f"Workspace files and any completed backend setup steps are preserved. Rerun `amrb setup --workspace {root}`; "
-        "check `amrb status --json` for the current state. Paper/vector data and Hindsight memory entries are preserved; "
-        "explicitly approved setup metadata may already have been applied."
+        "Workspace files and any completed backend setup steps are preserved. "
+        f"Rerun `{_uv_amrb_command('setup', '--workspace', str(root))}`; "
+        f"check `{_uv_amrb_command('--workspace', str(root), 'status', '--json')}` for the current state. "
+        "Paper/vector data and Hindsight memory entries are preserved; explicitly approved setup metadata may already have been applied."
     )
     result = _run(
         lambda: setup_workspace(
@@ -706,15 +824,18 @@ def setup(
     mcp_result = _run(
         lambda: verify_mcp_startup(root, current),
         recovery=(
-            f"Workspace, client, and backend settings were preserved. Rerun `amrb setup --workspace {root}` "
+            f"Workspace, client, and backend settings were preserved. "
+            f"Rerun `{_uv_amrb_command('setup', '--workspace', str(root))}` "
             "after fixing the MCP launch issue."
         ),
     )
+    mcp_command, mcp_arguments = mcp_launch_command(root)
     console.print("AMRB setup\n")
     console.print(f"Workspace    {current.workspace_name} ({current.workspace_id})")
     console.print(f"Memory bank  {current.hindsight_bank_id}")
     console.print(f"Collection   {current.qdrant_collection}")
     console.print(f"MCP server   Ready ({len(mcp_result['tools'])} tools; workspace binding confirmed)")
+    console.print("MCP launch   " + json.dumps({"command": mcp_command, "args": mcp_arguments}, ensure_ascii=False))
     console.print(f"Embedding    {result.embedding.title()}")
     console.print(f"Paper RAG    {'Ready' if result.environment == 'ready' and result.qdrant == 'ready' else 'Degraded'}")
     console.print(f"Qdrant       {result.qdrant.title()}")
@@ -936,7 +1057,7 @@ def paper_list(as_json: bool = typer.Option(False, "--json", help="Print stable 
 
 def _service_status() -> dict[str, str]:
     settings = get_settings()
-    managed = systemd_user_available() and service_is_active()
+    managed = service_is_active()
     api_ready = hindsight_healthcheck(settings)
     bank_health = _check_bank(settings) if api_ready else None
     return {

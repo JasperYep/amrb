@@ -72,29 +72,40 @@ class HindsightBankInspection:
 
 
 def _missions(settings: Settings) -> tuple[str, str, str]:
-    workspace = settings.workspace_name.strip() or "Research workspace"
-    domain = settings.discipline.strip() or "the researcher's field"
+    workspace = settings.workspace_name.strip() or "AMRB workspace"
+    domain = settings.discipline.strip() or "the workspace domain"
     focus = settings.research_focus.strip()
-    focus_line = f"Research focus: {focus}.\n\n" if focus else ""
+    focus_line = f"Workspace purpose: {focus}.\n\n" if focus else ""
+    memory_policy = " ".join(settings.memory_policy.split())
+    memory_policy_line = (
+        f"Workspace memory policy: {memory_policy}.\n\n"
+        if memory_policy
+        else ""
+    )
+    retention_guidance = (
+        f"Apply the workspace memory policy: {memory_policy}. "
+        if memory_policy
+        else "Retain explicit, durable judgments, hypotheses, decisions, concepts, and stable preferences. "
+    )
     retain_mission = (
-        f"Use this bank for the researcher's durable research cognition in the {workspace} workspace. "
-        f"The field is {domain}.\n\n{focus_line}"
-        "Retain only explicit, durable judgments, hypotheses, decisions, concepts, and stable preferences. "
-        "Do not treat questions, tentative discussion, paper facts, retrieved passages, routine answers, "
-        "or temporary tasks as the researcher's views. Paper evidence remains external to personal memory. "
-        "When a new view revises an older one, mark the new view as current and preserve only relevant history."
+        f"Use this bank for durable knowledge associated with the {workspace} workspace. "
+        f"The domain is {domain}.\n\n{focus_line}"
+        f"{retention_guidance}"
+        "Retain only knowledge the user states or confirms. "
+        "Keep questions, temporary tasks, and source passages in their original context. "
+        "When a new decision revises an older one, mark the new decision as current and preserve useful history."
     )
     reflect_mission = (
-        f"Synthesize the researcher's longer-term understanding in the {workspace} workspace ({domain}).\n\n"
-        f"{focus_line}Separate remembered judgments from external paper evidence and from the current synthesis. "
-        "Do not present a synthesis as a remembered judgment or as a paper claim. Identify meaningful changes "
-        "in the researcher's views over time."
+        f"Synthesize durable workspace knowledge for {workspace} ({domain}).\n\n"
+        f"{focus_line}{memory_policy_line}"
+        "Separate recalled knowledge from retrieved source evidence and the current synthesis. "
+        "Identify meaningful changes in decisions and understanding over time."
     )
     observations_mission = (
-        f"Consolidate durable research cognition for the {workspace} workspace ({domain}).\n\n"
-        f"{focus_line}Preserve the researcher's attribution and meaningful changes over time. "
-        "Keep paper facts separate from personal judgments; do not infer a durable view from a question, "
-        "tentative discussion, or paper summary."
+        f"Consolidate durable knowledge for the {workspace} workspace ({domain}).\n\n"
+        f"{focus_line}{memory_policy_line}"
+        "Preserve attribution and meaningful changes over time. "
+        "Distinguish user decisions from source content and tentative discussion."
     )
     return retain_mission, reflect_mission, observations_mission
 
