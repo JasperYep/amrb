@@ -110,6 +110,11 @@ def test_status_json_is_parseable_and_stable(monkeypatch):
         "qdrant": "ready",
         "papers": 4,
         "chunks": 195,
+        "workspace_id": "",
+        "workspace_name": "",
+        "memory_bank": "",
+        "collection": "",
+        "configuration": {},
     }
 
 
@@ -125,7 +130,10 @@ def test_doctor_json_is_parseable_and_contains_every_check(monkeypatch):
         papers=4,
         chunks=195,
     )
-    monkeypatch.setattr("paper_rag.amrb_cli.run_doctor", lambda verbose=False: (report, {}))
+    monkeypatch.setattr(
+        "paper_rag.amrb_cli.run_doctor",
+        lambda verbose=False, verify_embedding=False: (report, {}),
+    )
 
     result = CliRunner().invoke(app, ["doctor", "--json"])
 
@@ -141,7 +149,14 @@ def test_doctor_json_is_parseable_and_contains_every_check(monkeypatch):
     assert data["chunks"] == 195
 
 
-def test_paper_list_json_is_parseable():
+def test_paper_list_json_is_parseable(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "amrb.toml").write_text(
+        '[workspace]\nid = "test-workspace"\nname = "Test"\n[index]\ncollection = "test-papers"\n[memory]\nbank_id = "test-memory"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AMRB_WORKSPACE", str(workspace))
     runner = CliRunner()
     result = runner.invoke(app, ["paper", "list", "--json"])
     assert result.exit_code == 0

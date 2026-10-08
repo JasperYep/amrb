@@ -8,53 +8,6 @@ resolution-markers = [
 ]
 
 [[package]]
-name = "agent-memory-research"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "llama-index-core" },
-    { name = "llama-index-embeddings-openai" },
-    { name = "llama-index-readers-file" },
-    { name = "llama-index-vector-stores-qdrant" },
-    { name = "mcp" },
-    { name = "openai" },
-    { name = "pydantic-settings" },
-    { name = "pymupdf" },
-    { name = "pyyaml" },
-    { name = "qdrant-client" },
-    { name = "rich" },
-    { name = "typer" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "llama-index-core", specifier = ">=0.14,<0.15" },
-    { name = "llama-index-embeddings-openai", specifier = ">=0.7,<0.8" },
-    { name = "llama-index-readers-file", specifier = ">=0.7,<0.8" },
-    { name = "llama-index-vector-stores-qdrant", specifier = ">=0.10,<0.11" },
-    { name = "mcp", specifier = ">=2.3,<3" },
-    { name = "openai", specifier = ">=1,<4" },
-    { name = "pydantic-settings", specifier = ">=2.10,<3" },
-    { name = "pymupdf", specifier = ">=1.26,<2" },
-    { name = "pyyaml", specifier = ">=6,<7" },
-    { name = "qdrant-client", specifier = ">=1.15,<2" },
-    { name = "rich", specifier = ">=14,<15" },
-    { name = "typer", specifier = ">=0.19,<1" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8.4,<9" },
-    { name = "pytest-asyncio", specifier = ">=1.2,<2" },
-]
-
-[[package]]
 name = "aiohappyeyeballs"
 version = "2.7.1"
 source = { registry = "https://pypi.org/simple" }
@@ -225,6 +178,55 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/4e/8a/64761f4005f17809769d23e518d915db74e6310474e733e3593cfc854ef1/aiosqlite-0.22.1.tar.gz", hash = "sha256:043e0bd78d32888c0a9ca90fc788b38796843360c855a7262a532813133a0650", size = 14821, upload-time = "2025-12-23T19:25:43.997Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/00/b7/e3bf5133d697a08128598c8d0abc5e16377b51465a33756de24fa7dee953/aiosqlite-0.22.1-py3-none-any.whl", hash = "sha256:21c002eb13823fad740196c5a2e9d8e62f6243bd9e7e4a1f87fb5e44ecb4fceb", size = 17405, upload-time = "2025-12-23T19:25:42.139Z" },
+]
+
+[[package]]
+name = "amrb"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "llama-index-core" },
+    { name = "llama-index-embeddings-openai" },
+    { name = "llama-index-readers-file" },
+    { name = "llama-index-vector-stores-qdrant" },
+    { name = "mcp" },
+    { name = "openai" },
+    { name = "pydantic-settings" },
+    { name = "pymupdf" },
+    { name = "pyyaml" },
+    { name = "qdrant-client" },
+    { name = "rich" },
+    { name = "tomlkit" },
+    { name = "typer" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "llama-index-core", specifier = ">=0.14,<0.15" },
+    { name = "llama-index-embeddings-openai", specifier = ">=0.7,<0.8" },
+    { name = "llama-index-readers-file", specifier = ">=0.7,<0.8" },
+    { name = "llama-index-vector-stores-qdrant", specifier = ">=0.10,<0.11" },
+    { name = "mcp", specifier = ">=2.3,<3" },
+    { name = "openai", specifier = ">=1,<4" },
+    { name = "pydantic-settings", specifier = ">=2.10,<3" },
+    { name = "pymupdf", specifier = ">=1.26,<2" },
+    { name = "pyyaml", specifier = ">=6,<7" },
+    { name = "qdrant-client", specifier = ">=1.15,<2" },
+    { name = "rich", specifier = ">=14,<15" },
+    { name = "tomlkit", specifier = ">=0.13,<1" },
+    { name = "typer", specifier = ">=0.19,<1" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.4,<9" },
+    { name = "pytest-asyncio", specifier = ">=1.2,<2" },
 ]
 
 [[package]]
@@ -2846,6 +2848,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/38/0f/fae085b7f19fe0c67b68e6d70098ac6cd046cc498f253f5ee56a3dd03bbc/tinytag-2.3.2.tar.gz", hash = "sha256:021d711cdbdbf840d3b67b976cb34dadc58d2fcfd490eb74ef9602b37b991414", size = 47353, upload-time = "2026-09-07T17:46:08.886Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/6b/54/d378858d14e5c5c7b921cb9ffccf27be3d34f3d6d010c57404ddd634685d/tinytag-2.3.2-py3-none-any.whl", hash = "sha256:ebaf957915266b9c20414a10f8c5170a345aa039a794650d39d66e7d6b96199f", size = 37171, upload-time = "2026-09-07T17:46:07.434Z" },
+]
+
+[[package]]
+name = "tomlkit"
+version = "0.15.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/94/96/e07752635b98536177fa1f37671c8f3cdde2e724c6bcf6034b2cfb571565/tomlkit-0.15.1.tar.gz", hash = "sha256:e25bbf38843005246210a12982776f27f99cb9be67160e14434d0c0d21ee1e97", size = 180129, upload-time = "2026-07-17T01:48:04.562Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/13/bc/8c13eb66537dce1d2bd3a57132902f38d0e7f5bb46fa9f4daed9fe9d76ee/tomlkit-0.15.1-py3-none-any.whl", hash = "sha256:177a05aece5a8ca5266fd3c448abb47b8d352f09d477d3ca8332db4d89b24304", size = 49449, upload-time = "2026-07-17T01:48:05.728Z" },
 ]
 
 [[package]]

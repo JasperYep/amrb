@@ -1,73 +1,79 @@
-# AMRB · Agent Memory Research MCP
+# AMRB Research Workspace MCP
 
-一个面向 Agent Memory 研究的 MCP 工作区：论文事实与个人研究认知分开保存。
+[English](README.md) | [简体中文](README.zh-CN.md)
+
+AMRB connects a research project to one MCP server for paper evidence and long term research memory. The MCP client remains the conversation and reasoning interface; AMRB does not run an agent loop or provide a chat UI.
 
 ```text
-Agent ── AMRB MCP ──┬── Paper RAG / Qdrant：论文证据
-                    └── Hindsight：研究者长期认知
+MCP client ── AMRB ──┬── Paper RAG / Qdrant: external paper evidence
+                     └── Hindsight: researcher's long term judgments
 ```
 
-同一个 MCP 提供 `search_papers`、`list_papers`、`get_paper_pages`、`retain`、`recall`、`reflect`。客户端只需注册一个 stdio MCP 命令。
+Each workspace represents one research project. Its `amrb.toml` stores nonsecret project identity and data targets. Its `.env` stores API keys and deployment connection settings. Different workspaces use different collections and Hindsight banks by default.
 
-## 部署
+## Install and initialize
 
-需要 Python 3.12+、[`uv`](https://docs.astral.sh/uv/) 和任意支持 MCP 的 Agent。Linux `systemd --user` 可自动管理 Hindsight API；其他环境可按 `amrb setup` 输出手动启动。
+Install AMRB once, then initialize a workspace in the research project directory:
 
 ```bash
-git clone git@github.com:JasperYep/amrb.git
+git clone https://github.com/JasperYep/amrb.git
 cd amrb
 uv sync --locked
-cp .env.example .env
+uv run amrb setup --workspace /absolute/path/to/research-project
 ```
 
-在 `.env` 配置 Embedding 模型、Key、Base URL，以及 Hindsight LLM 的模型、Key、Base URL。两者可共用同一 OpenAI 兼容服务；Qdrant 默认本地运行，使用 Cloud 时再填写 `QDRANT_URL` 和 `QDRANT_API_KEY`。
+When running from source, the equivalent command is:
 
 ```bash
-uv run amrb setup
+uv --directory /absolute/path/to/amrb run amrb setup --workspace /absolute/path/to/research-project
 ```
 
-初始化 Hindsight API、创建 AMRB 专属 `agent-memory-research` bank，并检查 Qdrant。把 PDF 放入 `papers/`，首次建索引：
+Setup asks for the project name, field, optional research focus, embedding endpoint and key, and whether to use local or remote Qdrant. Optional Hindsight Control Plane and remote Qdrant Dashboard URLs can also be entered; setup probes configured links. API keys and URLs are entered in hidden terminal prompts, never in the MCP conversation. It creates `amrb.toml`, a user-only `.env`, a Codex MCP entry, and—only when absent—a generic `AGENTS.md` research policy. Existing `AGENTS.md`, other MCP entries, and unknown Codex config fields are preserved.
+
+For scripts, provide required settings through process environment or the workspace `.env` and use:
 
 ```bash
-uv run amrb paper sync
+uv --directory /absolute/path/to/amrb run amrb setup \
+  --workspace /absolute/path/to/research-project \
+  --name "Research project" --discipline "Your field" --non-interactive
 ```
 
-在 Agent 的 MCP 配置中注册以下 stdio 命令（把路径替换为本机仓库绝对路径）：
+If setup detects existing unconfigured papers or index data, explicitly pass `--adopt-legacy` after checking the configured targets. An old index without model and chunk metadata remains unverified until its configuration is inspected and confirmed with `--accept-legacy-index`. Setup preserves the old paper IDs, manifest, collection, bank, and shared Hindsight service.
 
-```text
-uv --directory /path/to/amrb run amrb-mcp
-```
+Workspace configs record the path where their identity was initialized. If a config is copied or moved, setup asks whether to keep the existing collection and bank (`--copied-identity reuse`) or create a new identity (`--copied-identity new`). A new identity selects a separate collection, bank, and local Qdrant directory; it archives the copied manifest and leaves PDFs and prior vector files in place without reindexing. A populated collection or existing Hindsight bank with unknown ownership requires explicit confirmation with `--adopt-existing-resources`.
 
-## 隔离与数据
+## MCP clients
 
-AMRB 的 MCP 只访问 `agent-memory-research` bank。Hindsight UI 会列出同一服务中的所有 banks；列表共用不代表记忆读写混用。新电脑首次部署会创建独立的本地 Hindsight 数据库。迁移记忆时只导出/导入 AMRB bank，不要复制包含其他项目数据的整个 Hindsight 数据目录。
-
-`.env`、`.state/` 和 `papers/*.pdf` 不进 Git。换电脑时单独复制论文 PDF；本地 Qdrant 索引可用 `paper sync` 重建。Hindsight 默认数据位于 `~/.hindsight/data/`。
-
-## 日常维护
+Codex is the reference onboarding client. Setup writes a workspace-bound stdio command to `.codex/config.toml`; the command pins both the AMRB installation and workspace paths, so MCP startup does not depend on the client's current directory. Other MCP clients can launch the same server:
 
 ```bash
-uv run amrb status
-uv run amrb doctor
-uv run amrb paper add ~/Downloads/paper.pdf
-uv run amrb paper sync
-uv run amrb service status
+uv --directory /absolute/path/to/amrb run amrb-mcp --workspace /absolute/path/to/research-project
 ```
 
-大批量离线入库可选用 OpenAI-compatible Batch File API；是否支持取决于 Embedding 服务商。任务会等待 Batch 完成后写入索引。若中断，可用本地 job ID 查询或继续：
+The MCP provides `search_papers`, `list_papers`, `get_paper_pages`, `retain`, `recall`, and `reflect`. Paper results identify the paper, retrieval method, and PDF page order. Hindsight tools are bound to the workspace bank at server startup; they do not accept a project or bank selector on each call.
 
-单个任务最多 50,000 个 chunk 请求、输入文件不超过 500 MB；服务商可能设置更低上限。
+## Inspect and maintain
 
 ```bash
-uv run amrb paper add --batch papers/*.pdf
-uv run amrb paper batch status <job-id>
-uv run amrb paper batch wait <job-id>
+uv --directory /absolute/path/to/amrb run amrb --workspace /absolute/path/to/research-project status --json
+uv --directory /absolute/path/to/amrb run amrb --workspace /absolute/path/to/research-project doctor --json
+uv --directory /absolute/path/to/amrb run amrb --workspace /absolute/path/to/research-project paper list --json
+uv --directory /absolute/path/to/amrb run amrb --workspace /absolute/path/to/research-project paper add ~/Downloads/paper.pdf
+uv --directory /absolute/path/to/amrb run amrb --workspace /absolute/path/to/research-project paper sync
 ```
 
-Hindsight 官方 Web UI 是可选的独立进程：
+`paper list` shows each PDF's title, page count, stable paper ID, and whether it is indexed, not indexed, changed since indexing, missing, failed, or unverified. JSON output is intended for scripts. `status` and `doctor` show workspace, bank, collection, paper, chunk, and service state.
 
-```bash
-npx --yes @vectorize-io/hindsight-control-plane --api-url http://127.0.0.1:8888
-```
+Hindsight Control Plane is the official interface for inspecting memory. Qdrant Dashboard is an infrastructure view for remote Qdrant and does not replace the paper inventory or retrieval results. These vendor interfaces may permit writes or deletion; opening them does not make them read only. A local embedded Qdrant store has no server Dashboard to open.
 
-详细研究规则见 [AGENTS.md](AGENTS.md)；环境变量见 [.env.example](.env.example)。
+AMRB does not automatically import PDFs, retain conversation history, or turn retrieved paper evidence into personal memory. Workspace collaboration rules govern when to use Paper RAG and Hindsight; they do not enforce write authorization at the MCP server.
+
+## Configuration
+
+`amrb.toml` contains the workspace ID, project description, paper directory, embedding model and chunking profile, Qdrant collection, and Hindsight bank. The workspace ID is generated once; renaming the project does not change data identity. Relative data paths resolve from the workspace root.
+
+`.env` contains keys and service connection values and is excluded from version control. Generated secret files use owner-only permissions. Workspace identity and the recorded embedding/chunk profile come from `amrb.toml`; deployment values resolve as process environment, workspace `.env`, then defaults. AMRB does not load an `.env` from its installation directory.
+
+Hindsight is a shared user service. A new workspace reuses a healthy service and gets a separate bank. Setup does not rewrite service credentials, restart a healthy shared service, or replace missions in an existing bank.
+
+If a bank already exists, setup shows any mission differences and asks before updating them. In scripts, use `--update-missions` only after reviewing the proposed workspace missions. Service logs redact configured keys and service URLs. If a setup step fails, its message reports what was saved and how to resume.

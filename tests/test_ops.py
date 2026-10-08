@@ -36,9 +36,11 @@ def test_sync_unchanged_and_changed_pdf(workspace, make_pdf):
     client = create_qdrant_client(settings)
     try:
         first = sync_papers(settings, embedding, client)
+        first_record = list_paper_records(settings)[0]
         unchanged = sync_papers(settings, embedding, client)
         make_pdf(paper, "Updated title")
         updated = sync_papers(settings, embedding, client)
+        updated_record = list_paper_records(settings)[0]
         count = client.count(settings.qdrant_collection, exact=True).count
     finally:
         client.close()
@@ -50,6 +52,7 @@ def test_sync_unchanged_and_changed_pdf(workspace, make_pdf):
     assert updated.updated == 1
     assert updated.papers == 1
     assert count == 3
+    assert updated_record.paper_id == first_record.paper_id
 
 
 def test_add_failure_leaves_file_retriable_by_sync(workspace, make_pdf, tmp_path):
@@ -65,7 +68,9 @@ def test_add_failure_leaves_file_retriable_by_sync(workspace, make_pdf, tmp_path
     try:
         failed = add_papers([source], settings, FailingEmbedding(), client)
         manifest_after_failure = load_manifest(settings.manifest_path)
+        failed_inventory = list_paper_records(settings)
         retried = sync_papers(settings, embedding, client)
+        recovered_inventory = list_paper_records(settings)
         count = client.count(settings.qdrant_collection, exact=True).count
     finally:
         client.close()
@@ -74,6 +79,8 @@ def test_add_failure_leaves_file_retriable_by_sync(workspace, make_pdf, tmp_path
     assert len(failed.failed) == 1
     assert failed.failed[0].copied is True
     assert "provider unavailable" in failed.failed[0].message
+    assert failed_inventory[0].index_status == "failed"
+    assert recovered_inventory[0].index_status == "indexed"
     assert not manifest_after_failure
     assert retried.error is None
     assert retried.added == 1

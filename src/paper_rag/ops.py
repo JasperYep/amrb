@@ -9,13 +9,20 @@ from uuid import uuid4
 
 import pymupdf
 
-from paper_rag.config import Settings, create_qdrant_client, create_vector_store, get_settings
+from paper_rag.config import (
+    Settings,
+    create_qdrant_client,
+    create_vector_store,
+    get_settings,
+    redact_sensitive_text,
+)
 from paper_rag.ingest import (
     _delete_paper,
     _paper_nodes,
     ingest_papers,
     load_manifest,
     sha256_file,
+    validate_index_compatibility,
     write_manifest,
 )
 from paper_rag.models import (
@@ -36,10 +43,38 @@ def _paper_path(relative_path: str, settings: Settings) -> Path | None:
     return path
 
 
+def _index_failures_path(settings: Settings) -> Path:
+    return settings.state_dir / "index-failures.json"
+
+
+def _clear_index_failure(settings: Settings, relative_path: str) -> None:
+    path = _index_failures_path(settings)
+    failures = load_manifest(path)
+    if relative_path in failures:
+        del failures[relative_path]
+        write_manifest(path, failures)
+
+
+def _mark_index_failure(
+    settings: Settings,
+    relative_path: str,
+    source_path: Path,
+    message: object,
+) -> None:
+    failures = load_manifest(_index_failures_path(settings))
+    failure = _failure(relative_path, message, False, settings)
+    failures[relative_path] = {
+        "source_sha256": sha256_file(source_path),
+        "message": failure.message,
+    }
+    write_manifest(_index_failures_path(settings), failures)
+
+
 def _record(
     relative_path: str,
-    entry: dict[str, Any],
+    entry: dict[str, Any] | None,
     settings: Settings,
+    failure: dict[str, Any] | None = None,
 ) -> PaperRecord:
     path = _paper_path(relative_path, settings)
     pages: int | None = None
@@ -49,23 +84,60 @@ def _record(
                 pages = pdf.page_count
         except Exception:
             pages = None
+    title = str(entry.get("title") or (path.stem if path else Path(relative_path).stem)) if entry else (
+        path.stem if path else Path(relative_path).stem
+    )
+    if path is not None and path.is_file() and not (entry or {}).get("title"):
+        try:
+            with pymupdf.open(path) as pdf:
+                title = str((pdf.metadata or {}).get("title") or "").strip() or title
+        except Exception:
+            pass
+    source_hash = sha256_file(path) if path is not None and path.is_file() else None
+    failure_matches_source = bool(
+        failure and source_hash and failure.get("source_sha256") == source_hash
+    )
+    if failure_matches_source:
+        status = "failed"
+    elif entry is None:
+        status = "not_indexed"
+    elif path is None or not path.is_file():
+        status = "source_missing"
+    elif entry.get("sha256") and source_hash != entry["sha256"]:
+        status = "source_changed"
+    elif not entry.get("paper_id"):
+        status = "failed"
+    elif not isinstance(entry.get("index_config"), dict) and not settings.legacy_index_accepted:
+        status = "unverified"
+    else:
+        status = "indexed"
     return PaperRecord(
-        paper_id=str(entry.get("paper_id", "")),
-        title=str(entry.get("title") or (path.stem if path else relative_path)),
+        paper_id=str(entry["paper_id"]) if entry and entry.get("paper_id") else None,
+        title=title,
         file_name=Path(relative_path).name,
         pages=pages,
-        chunks=int(entry.get("chunk_count", 0)),
+        chunks=int((entry or {}).get("chunk_count", 0)),
+        index_status=status,
+        index_message=str(failure.get("message")) if failure_matches_source and failure else None,
     )
 
 
 def list_paper_records(settings: Settings | None = None) -> list[PaperRecord]:
     current = settings or get_settings()
     manifest = load_manifest(current.manifest_path)
-    return [
-        _record(path, entry, current)
+    failures = load_manifest(_index_failures_path(current))
+    records = [
+        _record(path, entry, current, failures.get(path))
         for path, entry in sorted(manifest.items())
-        if entry.get("paper_id")
     ]
+    tracked = set(manifest)
+    for path in sorted(current.papers_dir.glob("*.pdf")):
+        if not path.is_file():
+            continue
+        relative_path = path.relative_to(current.workspace_root).as_posix()
+        if relative_path not in tracked:
+            records.append(_record(relative_path, None, current, failures.get(relative_path)))
+    return records
 
 
 def _copy_atomic(source: Path, destination: Path) -> None:
@@ -88,13 +160,7 @@ def _failure(
     copied: bool,
     settings: Settings,
 ) -> PaperFailure:
-    clean_message = " ".join(str(message).split())
-    for secret in (
-        settings.embedding_api_key.get_secret_value() if settings.embedding_api_key else "",
-        settings.qdrant_api_key.get_secret_value() if settings.qdrant_api_key else "",
-    ):
-        if secret:
-            clean_message = clean_message.replace(secret, "[REDACTED]")
+    clean_message = " ".join(redact_sensitive_text(str(message), settings).split())
     if len(clean_message) > 500:
         clean_message = clean_message[:497] + "..."
     return PaperFailure(source=source, message=clean_message, copied=copied)
@@ -107,6 +173,7 @@ def add_papers(
     qdrant_client: Any | None = None,
 ) -> PaperAddResult:
     current = settings or get_settings()
+    validate_index_compatibility(load_manifest(current.manifest_path), current)
     if not paths:
         raise ValueError("至少指定一个 PDF 文件路径。")
     current.papers_dir.mkdir(parents=True, exist_ok=True)
@@ -116,6 +183,8 @@ def add_papers(
     for supplied_path in paths:
         source_label = str(supplied_path)
         copied = False
+        destination: Path | None = None
+        relative_path: str | None = None
         try:
             source = Path(supplied_path).expanduser().resolve(strict=True)
             if not source.is_file():
@@ -141,6 +210,7 @@ def add_papers(
                 duplicate_path = _paper_path(duplicate[0], current)
                 if duplicate_path is not None and not duplicate_path.is_file():
                     _copy_atomic(source, duplicate_path)
+                _clear_index_failure(current, duplicate[0])
                 result.skipped.append(_record(duplicate[0], duplicate[1], current))
                 continue
 
@@ -178,13 +248,20 @@ def add_papers(
             entry = updated_manifest.get(relative_path)
             if not entry or entry.get("sha256") != digest:
                 raise RuntimeError("文件已复制，但索引清单未确认该论文。")
+            _clear_index_failure(current, relative_path)
             record = _record(relative_path, entry, current)
             if old_hash and old_hash != digest:
                 result.updated.append(record)
             else:
                 result.added.append(record)
         except Exception as exc:
-            result.failed.append(_failure(source_label, exc, copied, current))
+            failure = _failure(source_label, exc, copied, current)
+            result.failed.append(failure)
+            if destination is not None and relative_path and destination.is_file():
+                try:
+                    _mark_index_failure(current, relative_path, destination, exc)
+                except Exception:
+                    failure.message += " Index failure status could not be persisted; run `amrb paper sync`."
 
     return result
 
@@ -198,10 +275,12 @@ def sync_papers(
     current = settings or get_settings()
     before = load_manifest(current.manifest_path)
     error: str | None = None
+    ingest_error: str | None = None
     try:
         ingest_papers(current, embedding_model, qdrant_client)
     except Exception as exc:
-        error = " ".join(str(exc).split())[:500]
+        ingest_error = _failure("paper sync", exc, False, current).message
+        error = ingest_error
 
     after = load_manifest(current.manifest_path)
     current_file_hashes = {
@@ -209,6 +288,22 @@ def sync_papers(
         for path in current.papers_dir.glob("*.pdf")
         if path.is_file()
     }
+    if ingest_error:
+        for relative_path, digest in current_file_hashes.items():
+            if before.get(relative_path, {}).get("sha256") == digest:
+                continue
+            try:
+                _mark_index_failure(
+                    current,
+                    relative_path,
+                    current.workspace_root / relative_path,
+                    ingest_error,
+                )
+            except Exception:
+                pass
+    else:
+        for relative_path in after:
+            _clear_index_failure(current, relative_path)
     added = sum(path not in before for path in after)
     updated = sum(
         path in before and before[path].get("sha256") != entry.get("sha256")
@@ -316,4 +411,5 @@ def remove_paper(
 
     if staged is not None:
         staged.unlink(missing_ok=True)
+    _clear_index_failure(current, relative_path)
     return PaperRemoveResult(removed=record)

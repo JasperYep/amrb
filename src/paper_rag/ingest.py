@@ -17,13 +17,23 @@ from llama_index.core.schema import (
     RelatedNodeInfo,
 )
 from llama_index.readers.file import PyMuPDFReader
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
+    PointIdsList,
+    VectorParams,
+)
 
 from paper_rag.config import (
     Settings,
+    claim_qdrant_collection,
     create_embedding_model,
     create_qdrant_client,
     create_vector_store,
     get_settings,
+    stable_paper_id,
 )
 from paper_rag.models import IngestResult
 
@@ -106,6 +116,7 @@ def _paper_nodes(path: Path, paper_id: str, settings: Settings) -> tuple[list[Ba
     for index, source_page in enumerate(source_pages, start=1):
         metadata = {
             "paper_id": paper_id,
+            "workspace_id": settings.workspace_id,
             "file_name": path.name,
             "title": title,
             "page_number": _page_number(source_page.metadata, index),
@@ -131,7 +142,7 @@ def _paper_nodes(path: Path, paper_id: str, settings: Settings) -> tuple[list[Ba
         content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
         page = int(node.metadata["page_number"])
         node.metadata["content_hash"] = content_hash
-        node.id_ = str(uuid5(NAMESPACE_URL, f"paper-rag:{paper_id}:{page}:{index}:{content_hash}"))
+        node.id_ = str(uuid5(NAMESPACE_URL, f"amrb:{paper_id}:{page}:{index}"))
         node.relationships[NodeRelationship.SOURCE] = RelatedNodeInfo(node_id=paper_id)
     return [node for node in nodes if node.get_content(metadata_mode=MetadataMode.NONE).strip()], title
 
@@ -140,9 +151,11 @@ def _index_pdf(
     path: Path,
     paper_id: str,
     settings: Settings,
+    client: Any,
     vector_store: Any,
     embedding_model: Any,
-) -> tuple[str, int]:
+    expected_dimension: int | None = None,
+) -> tuple[str, int, int]:
     nodes, title = _paper_nodes(path, paper_id, settings)
     if not nodes:
         raise ValueError(f"PDF 中没有可检索的正文文本：{path.name}")
@@ -165,10 +178,114 @@ def _index_pdf(
         raise RuntimeError(f"Embedding failed for {path.name}: {exc}") from exc
     if len(embeddings) != len(nodes):
         raise ValueError(f"Embedding 返回数量不匹配：{path.name}")
+    dimensions = {len(vector) for vector in embeddings}
+    if len(dimensions) != 1:
+        raise ValueError(f"Embedding 返回向量维度不一致：{path.name}")
+    dimension = dimensions.pop()
+    if expected_dimension is not None and dimension != expected_dimension:
+        raise ValueError(
+            f"Embedding returned dimension {dimension}, but this workspace index requires {expected_dimension}. "
+            "No vectors were written. Explicitly rebuild the workspace index to change dimensions."
+        )
     for node, embedding in zip(nodes, embeddings, strict=True):
         node.embedding = embedding
+    exists, _, _ = claim_qdrant_collection(client, settings)
+    if not exists:
+        client.create_collection(
+            collection_name=settings.qdrant_collection,
+            vectors_config=VectorParams(size=dimension, distance=Distance.COSINE),
+            metadata={"amrb_workspace_id": settings.workspace_id},
+        )
+        if hasattr(vector_store, "_collection_initialized"):
+            vector_store._collection_initialized = True
     vector_store.add(nodes)
-    return title, len(nodes)
+    active_ids = {node.id_ for node in nodes}
+    offset = None
+    stale_ids: list[str | int] = []
+    while True:
+        points, offset = client.scroll(
+            collection_name=settings.qdrant_collection,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="paper_id", match=MatchValue(value=paper_id))]
+            ),
+            limit=1000,
+            with_payload=False,
+            with_vectors=False,
+            offset=offset,
+        )
+        stale_ids.extend(point.id for point in points if point.id not in active_ids)
+        if offset is None:
+            break
+    if stale_ids:
+        client.delete(
+            collection_name=settings.qdrant_collection,
+            points_selector=PointIdsList(points=stale_ids),
+            wait=True,
+        )
+    return title, len(nodes), dimension
+
+
+def index_profile(settings: Settings, dimension: int) -> dict[str, Any]:
+    return {
+        "provider": settings.embedding_provider,
+        "model": settings.embedding_model,
+        "dimension": dimension,
+        "chunk_size": settings.rag_chunk_size,
+        "chunk_overlap": settings.rag_chunk_overlap,
+    }
+
+
+def validate_index_compatibility(manifest: Manifest, settings: Settings) -> None:
+    entries = [entry for entry in manifest.values() if entry.get("paper_id")]
+    if not entries:
+        return
+    unverified = [entry for entry in entries if not isinstance(entry.get("index_config"), dict)]
+    if unverified and not settings.legacy_index_accepted:
+        raise ValueError(
+            "This index predates embedding and chunk metadata and is unverified. "
+            "Run `amrb setup` and explicitly confirm its existing configuration before searching or indexing."
+        )
+    expected = {
+        "provider": settings.embedding_provider,
+        "model": settings.embedding_model,
+        "chunk_size": settings.rag_chunk_size,
+        "chunk_overlap": settings.rag_chunk_overlap,
+    }
+    recorded_dimensions = {
+        int(profile["dimension"])
+        for entry in entries
+        if isinstance((profile := entry.get("index_config")), dict) and profile.get("dimension")
+    }
+    if len(recorded_dimensions) > 1:
+        raise ValueError(
+            "The workspace contains papers indexed with different vector dimensions. "
+            "Queries and mixed writes are blocked until the index is explicitly rebuilt."
+        )
+    if settings.embedding_dimension and recorded_dimensions and recorded_dimensions != {settings.embedding_dimension}:
+        raise ValueError(
+            "The workspace vector dimension does not match its recorded paper index. "
+            "Queries and mixed writes are blocked until the index is explicitly rebuilt."
+        )
+    for entry in entries:
+        profile = entry.get("index_config")
+        if not isinstance(profile, dict):
+            continue
+        mismatch = {
+            key: (profile.get(key), value)
+            for key, value in expected.items()
+            if profile.get(key) != value
+        }
+        if mismatch:
+            fields = ", ".join(sorted(mismatch))
+            raise ValueError(
+                f"Index configuration mismatch for paper {entry.get('paper_id')}: {fields}. "
+                "Queries and mixed writes are blocked; explicitly rebuild this workspace index."
+            )
+        if settings.embedding_dimension and profile.get("dimension") != settings.embedding_dimension:
+            raise ValueError(
+                "Embedding vector dimension does not match the workspace index profile. "
+                "Queries and mixed writes are blocked; explicitly rebuild this workspace index."
+            )
 
 
 def _delete_paper(vector_store: Any, paper_id: str, client: Any, collection: str) -> None:
@@ -205,13 +322,25 @@ def _index_changed_files(
         chunks_indexed = 0
         for path, relative_path, file_hash in changes:
             previous = manifest.get(relative_path)
-            paper_id = file_hash[:16]
-            title, chunk_count = _index_pdf(
+            known_dimensions = {
+                int(profile["dimension"])
+                for item in manifest.values()
+                if isinstance((profile := item.get("index_config")), dict) and profile.get("dimension")
+            }
+            expected_dimension = settings.embedding_dimension
+            if expected_dimension is None and len(known_dimensions) == 1:
+                expected_dimension = next(iter(known_dimensions))
+            paper_id = str(previous.get("paper_id")) if previous and previous.get("paper_id") else stable_paper_id(
+                settings.workspace_id, relative_path
+            )
+            title, chunk_count, dimension = _index_pdf(
                 path,
                 paper_id,
                 settings,
+                client,
                 vector_store,
                 active_embedding,
+                expected_dimension,
             )
             old_paper_id = previous.get("paper_id") if previous else None
             if old_paper_id and old_paper_id != paper_id and old_paper_id not in desired_ids:
@@ -222,6 +351,7 @@ def _index_changed_files(
                 "indexed_at": datetime.now(UTC).isoformat(timespec="seconds"),
                 "title": title,
                 "chunk_count": chunk_count,
+                "index_config": index_profile(settings, dimension),
             }
             write_manifest(settings.manifest_path, manifest)
             chunks_indexed += chunk_count
@@ -279,6 +409,7 @@ def ingest_papers(
     current = settings or get_settings()
     current.papers_dir.mkdir(parents=True, exist_ok=True)
     manifest = load_manifest(current.manifest_path)
+    validate_index_compatibility(manifest, current)
     full_sync = paths is None
     if paths is None:
         pdfs = sorted(current.papers_dir.glob("*.pdf"))
@@ -295,7 +426,10 @@ def ingest_papers(
         for path in pdfs
     }
     if full_sync:
-        desired_ids = {digest[:16] for digest in current_hashes.values()}
+        desired_ids = {
+            str(manifest.get(path, {}).get("paper_id") or stable_paper_id(current.workspace_id, path))
+            for path in current_hashes
+        }
     else:
         targeted_paths = set(current_hashes)
         desired_ids = {
@@ -303,7 +437,10 @@ def ingest_papers(
             for relative_path, entry in manifest.items()
             if relative_path not in targeted_paths and entry.get("paper_id")
         }
-        desired_ids.update(digest[:16] for digest in current_hashes.values())
+        desired_ids.update(
+            str(manifest.get(path, {}).get("paper_id") or stable_paper_id(current.workspace_id, path))
+            for path in current_hashes
+        )
     indexed, skipped, chunks = _index_changed_files(
         pdfs,
         current_hashes,

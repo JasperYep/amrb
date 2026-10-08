@@ -11,26 +11,21 @@ from paper_rag.config import (
     create_embedding_model,
     create_qdrant_client,
     get_settings,
+    redact_sensitive_text,
+    resolved_configuration,
+    verify_qdrant_collection_identity,
 )
 from paper_rag.ingest import load_manifest
 from paper_rag.models import ComponentHealth, DoctorReport, SystemStatus
 from paper_rag.service import hindsight_base_url, hindsight_healthcheck
-
-BANK_ID = "agent-memory-research"
-
+from paper_rag.hindsight_setup import inspect_hindsight_bank
 
 def _health(status: str, message: str | None = None) -> ComponentHealth:
     return ComponentHealth(status=status, message=message)
 
 
 def _redact_secrets(message: str, settings: Settings) -> str:
-    for secret in (
-        settings.embedding_api_key.get_secret_value() if settings.embedding_api_key else "",
-        settings.qdrant_api_key.get_secret_value() if settings.qdrant_api_key else "",
-    ):
-        if secret:
-            message = message.replace(secret, "[REDACTED]")
-    return message
+    return redact_sensitive_text(message, settings)
 
 
 def _has_embedding_config(settings: Settings) -> bool:
@@ -63,6 +58,10 @@ def _qdrant_client_if_present(settings: Settings):
 def get_system_status(settings: Settings | None = None) -> SystemStatus:
     current = settings or get_settings()
     manifest, _, missing_files = _manifest_counts(current)
+    unverified_index = any(
+        entry.get("paper_id") and not isinstance(entry.get("index_config"), dict)
+        for entry in manifest.values()
+    ) and not current.legacy_index_accepted
     qdrant = "ready"
     chunks = 0
     try:
@@ -73,6 +72,7 @@ def get_system_status(settings: Settings | None = None) -> SystemStatus:
         else:
             try:
                 if client.collection_exists(current.qdrant_collection):
+                    verify_qdrant_collection_identity(client, current)
                     chunks = client.count(current.qdrant_collection, exact=True).count
             finally:
                 client.close()
@@ -81,7 +81,7 @@ def get_system_status(settings: Settings | None = None) -> SystemStatus:
 
     hindsight = "ready" if hindsight_healthcheck(current) else "unavailable"
     paper_rag = "ready"
-    if qdrant != "ready" or not _has_embedding_config(current) or missing_files:
+    if qdrant != "ready" or not _has_embedding_config(current) or missing_files or unverified_index:
         paper_rag = "degraded"
     if manifest and chunks == 0:
         paper_rag = "degraded"
@@ -92,16 +92,19 @@ def get_system_status(settings: Settings | None = None) -> SystemStatus:
         qdrant=qdrant,
         papers=len(manifest),
         chunks=chunks,
+        workspace_id=current.workspace_id,
+        workspace_name=current.workspace_name,
+        memory_bank=current.hindsight_bank_id,
+        collection=current.qdrant_collection,
+        configuration=resolved_configuration(current),
     )
 
 
 def _check_environment(settings: Settings) -> ComponentHealth:
-    if not (settings.workspace_root / ".env").is_file():
-        return _health("unavailable", "项目根目录缺少 .env。")
     if not _has_embedding_config(settings):
         return _health(
             "unavailable",
-            "请配置 EMBEDDING_API_KEY、EMBEDDING_BASE_URL 和 EMBEDDING_MODEL。",
+            "请配置 EMBEDDING_API_KEY、EMBEDDING_BASE_URL 和 EMBEDDING_MODEL（可来自进程环境或 workspace .env）。",
         )
     return _health("ready")
 
@@ -150,6 +153,10 @@ def _check_qdrant(settings: Settings) -> tuple[ComponentHealth, int, str | None]
                 return _health("ready"), 0, None
             collection = client.get_collection(settings.qdrant_collection)
             count = client.count(settings.qdrant_collection, exact=True).count
+            try:
+                verify_qdrant_collection_identity(client, settings)
+            except ValueError as exc:
+                return _health("degraded", str(exc)), count, None
             schema = collection.payload_schema or {}
             if "paper_id" in schema:
                 schema_type = getattr(schema["paper_id"], "data_type", schema["paper_id"])
@@ -172,6 +179,14 @@ def _check_paper_index(settings: Settings, chunks: int, qdrant_status: str) -> C
     manifest, expected_chunks, missing_files = _manifest_counts(settings)
     if missing_files:
         return _health("degraded", "索引清单引用的 PDF 文件缺失或路径无效。")
+    if any(
+        entry.get("paper_id") and not isinstance(entry.get("index_config"), dict)
+        for entry in manifest.values()
+    ) and not settings.legacy_index_accepted:
+        return _health(
+            "degraded",
+            "旧索引未记录 embedding 模型、维度和切分配置；运行 `amrb setup` 并显式确认后再按已验证索引使用。",
+        )
     if manifest and (qdrant_status != "ready" or chunks != expected_chunks):
         return _health("degraded", "论文索引与 Qdrant 状态不一致。")
     if not manifest:
@@ -182,7 +197,7 @@ def _check_paper_index(settings: Settings, chunks: int, qdrant_status: str) -> C
 async def _bank_exists(settings: Settings) -> bool:
     url = f"{hindsight_base_url(settings)}/mcp/"
     async with Client(url, read_timeout_seconds=10) as client:
-        result = await client.call_tool("get_bank", {"bank_id": BANK_ID})
+        result = await client.call_tool("get_bank", {"bank_id": settings.hindsight_bank_id})
         if result.is_error:
             return False
         for item in result.content:
@@ -192,7 +207,7 @@ async def _bank_exists(settings: Settings) -> bool:
                 response = json.loads(item.text)
             except json.JSONDecodeError:
                 continue
-            return response.get("bank_id") == BANK_ID
+            return response.get("bank_id") == settings.hindsight_bank_id
     return False
 
 
@@ -201,8 +216,14 @@ def _check_bank(settings: Settings) -> ComponentHealth:
         return _health("unavailable", "Hindsight API 未就绪。")
     try:
         if asyncio.run(_bank_exists(settings)):
+            if not settings.hindsight_resource_accepted and not settings.legacy_data_compatibility:
+                return _health(
+                    "degraded",
+                    "Hindsight bank exists but workspace ownership is unconfirmed. "
+                    "Review it with `amrb setup --adopt-existing-resources`.",
+                )
             return _health("ready")
-        return _health("unavailable", f"找不到 Hindsight bank：{BANK_ID}。")
+        return _health("unavailable", f"找不到 Hindsight bank：{settings.hindsight_bank_id}。")
     except Exception as exc:
         return _health("unavailable", "无法读取 Hindsight memory bank。")
 
@@ -210,10 +231,19 @@ def _check_bank(settings: Settings) -> ComponentHealth:
 def run_doctor(
     settings: Settings | None = None,
     verbose: bool = False,
+    verify_embedding: bool = True,
 ) -> tuple[DoctorReport, dict[str, str]]:
     current = settings or get_settings()
     environment = _check_environment(current)
-    embedding, embedding_details = _check_embedding(current, verbose)
+    if verify_embedding:
+        embedding, embedding_details = _check_embedding(current, verbose)
+    elif _has_embedding_config(current):
+        embedding, embedding_details = (
+            _health("unverified", "Network check skipped; pass --verify-embedding to send one minimal request."),
+            None,
+        )
+    else:
+        embedding, embedding_details = _health("unavailable", "Embedding configuration is incomplete."), None
     qdrant, chunks, qdrant_details = _check_qdrant(current)
     index = _check_paper_index(current, chunks, qdrant.status)
     hindsight = (
@@ -232,6 +262,11 @@ def run_doctor(
         memory_bank=bank,
         papers=len(papers),
         chunks=chunks,
+        workspace_id=current.workspace_id,
+        workspace_name=current.workspace_name,
+        memory_bank_id=current.hindsight_bank_id,
+        collection=current.qdrant_collection,
+        configuration=resolved_configuration(current),
     )
     details = {
         key: value

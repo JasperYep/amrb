@@ -3,6 +3,7 @@ import json
 import pytest
 
 from paper_rag import server
+from paper_rag.config import Settings
 from paper_rag.models import PaperBrief, PaperHit, PaperPage
 
 
@@ -19,6 +20,10 @@ async def test_mcp_exposes_paper_and_memory_tools(monkeypatch):
     tools = await server.mcp.list_tools()
     assert {tool.name for tool in tools} == expected_names
     assert all(tool.output_schema for tool in tools)
+    descriptions = " ".join(tool.description or "" for tool in tools).casefold()
+    assert "agent memory" not in descriptions
+    assert "amrb hindsight bank" not in descriptions
+    assert "personal research" in descriptions or "researcher" in descriptions
 
     hit = PaperHit(
         paper_id="0123456789abcdef",
@@ -41,8 +46,13 @@ async def test_mcp_exposes_paper_and_memory_tools(monkeypatch):
         citation=hit.citation,
         text=hit.text,
     )
+    monkeypatch.setattr(
+        server,
+        "_BOUND_SETTINGS",
+        Settings(_env_file=None, workspace_id="bound-workspace", hindsight_bank_id="bound-bank"),
+    )
     monkeypatch.setattr(server, "retrieve_papers", lambda **kwargs: [hit])
-    monkeypatch.setattr(server, "read_papers", lambda: [paper])
+    monkeypatch.setattr(server, "read_papers", lambda settings=None: [paper])
     monkeypatch.setattr(server, "read_paper_pages", lambda **kwargs: [page])
 
     remote_calls = []

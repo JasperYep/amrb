@@ -1,2 +1,1 @@
-"""Paper RAG components for the Agent Memory research workspace."""
-
+"""AMRB research workspace MCP and Paper RAG components."""

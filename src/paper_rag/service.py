@@ -6,6 +6,7 @@ import signal
 import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,13 +14,12 @@ from typing import Callable, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
-from paper_rag.config import Settings, get_settings
+from paper_rag.config import Settings, get_settings, redact_sensitive_text
 
 DEFAULT_HINDSIGHT_VERSION = "0.10.2"
 HINDSIGHT_SERVICE_NAME = "amrb-hindsight.service"
 DEFAULT_HINDSIGHT_HOST = "127.0.0.1"
 HINDSIGHT_API_PORT = 8888
-HINDSIGHT_BANK_ID = "agent-memory-research"
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
@@ -45,7 +45,8 @@ def hindsight_base_url(settings: Settings | None = None) -> str:
 
 
 def hindsight_mcp_url(settings: Settings | None = None) -> str:
-    return f"{hindsight_base_url(settings)}/mcp/{HINDSIGHT_BANK_ID}/"
+    current = settings or get_settings()
+    return f"{hindsight_base_url(current)}/mcp/{current.hindsight_bank_id}/"
 
 
 def hindsight_healthcheck(settings: Settings | None = None, timeout: float = 2.0) -> bool:
@@ -113,9 +114,26 @@ def _ensure_env_file(paths: ServicePaths, settings: Settings) -> None:
             additions.append(f"HINDSIGHT_API_LLM_API_KEY={_env_value(secret)}")
     if additions:
         separator = "" if not existing or existing.endswith("\n") else "\n"
-        paths.env_file.write_text(
-            existing + separator + "\n".join(additions) + "\n", encoding="utf-8"
-        )
+        content = existing + separator + "\n".join(additions) + "\n"
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=paths.config_dir,
+                prefix=f".{paths.env_file.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                os.fchmod(temporary.fileno(), 0o600)
+                temporary.write(content)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_path, paths.env_file)
+        finally:
+            if temporary_path and temporary_path.exists():
+                temporary_path.unlink()
     paths.env_file.chmod(0o600)
 
 
@@ -275,6 +293,7 @@ def restart_service(
 def service_logs(
     lines: int = 100,
     runner: Runner = subprocess.run,
+    settings: Settings | None = None,
 ) -> str:
     if lines < 1 or lines > 1000:
         raise ValueError("日志行数必须在 1 到 1000 之间。")
@@ -293,5 +312,45 @@ def service_logs(
         runner,
     )
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "could not read Hindsight service logs")
-    return result.stdout
+        message = redact_service_text(result.stderr.strip(), settings)
+        raise RuntimeError(message or "could not read Hindsight service logs")
+    return redact_service_text(result.stdout, settings)
+
+
+def redact_service_text(text: str, settings: Settings | None = None) -> str:
+    output = text
+    current = settings
+    if current is None:
+        try:
+            current = get_settings()
+        except (FileNotFoundError, ValueError):
+            current = None
+    if current is not None:
+        output = redact_sensitive_text(output, current)
+
+    sensitive_values = {
+        value
+        for name, value in os.environ.items()
+        if value and any(token in name.casefold() for token in ("key", "token", "secret", "password"))
+    }
+    env_file = service_paths().env_file
+    try:
+        lines = env_file.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        match = re.match(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$", line)
+        if not match:
+            continue
+        name, value = match.groups()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1].replace("\\\"", "\"").replace("\\\\", "\\")
+        if value and (
+            any(token in name.casefold() for token in ("key", "token", "secret", "password"))
+            or "url" in name.casefold()
+        ):
+            sensitive_values.add(value)
+    for value in sorted(sensitive_values, key=len, reverse=True):
+        output = output.replace(value, "[REDACTED]")
+    return output

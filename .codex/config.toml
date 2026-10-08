@@ -1,6 +1,0 @@
-[mcp_servers.amrb]
-command = "uv"
-args = ["run", "amrb-mcp"]
-required = true
-enabled_tools = ["search_papers", "list_papers", "get_paper_pages", "retain", "recall", "reflect"]
-startup_timeout_sec = 30

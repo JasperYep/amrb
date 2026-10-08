@@ -1,14 +1,14 @@
 import asyncio
 import json
 import sys
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlencode
+from urllib.request import Request, urlopen
 
-from mcp import Client
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-HINDSIGHT_MCP_URL = "http://127.0.0.1:8888/mcp/"
-BANK_ID = "agent-memory-research"
+from paper_rag.config import Settings, get_settings, redact_sensitive_text
+from paper_rag.service import hindsight_base_url, redact_service_text
 
 
 def _section(markdown: str, heading: str) -> str:
@@ -25,69 +25,212 @@ def _section(markdown: str, heading: str) -> str:
     return "\n".join(lines[start:end]).strip()
 
 
-async def _call(client: Client, name: str, arguments: dict[str, Any]) -> str:
-    result = await client.call_tool(name, arguments)
-    if result.is_error:
-        message = "\n".join(item.text for item in result.content if item.type == "text")
-        raise RuntimeError(f"Hindsight {name} failed: {message}")
-    return "\n".join(item.text for item in result.content if item.type == "text")
+def _hindsight_rest_json(
+    method: str,
+    path: str,
+    *,
+    body: dict[str, Any] | None = None,
+    timeout: float = 8.0,
+) -> dict[str, Any]:
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    request = Request(
+        f"{hindsight_base_url()}{path}",
+        data=data,
+        headers={"Content-Type": "application/json"} if data is not None else {},
+        method=method,
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            payload = response.read()
+    except HTTPError as exc:
+        raise RuntimeError(f"Hindsight bank request failed (HTTP {exc.code}).") from None
+    except (URLError, TimeoutError, OSError):
+        raise RuntimeError("Could not reach the shared Hindsight API for bank configuration.") from None
+    try:
+        value = json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise RuntimeError("Hindsight returned an invalid bank configuration response.") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("Hindsight returned an unexpected bank configuration response.")
+    return value
 
 
-async def configure_hindsight_bank() -> None:
-    policy = (PROJECT_ROOT / "AGENTS.md").read_text(encoding="utf-8")
-    memory_policy = _section(policy, "Memory")
-    evidence_policy = _section(policy, "证据与判断")
+@dataclass(frozen=True)
+class MissionChange:
+    field: str
+    current: str | None
+    desired: str
+
+
+@dataclass(frozen=True)
+class HindsightBankInspection:
+    bank_id: str
+    exists: bool
+    name: str | None = None
+    changes: tuple[MissionChange, ...] = ()
+    unavailable_fields: tuple[str, ...] = ()
+
+
+def _missions(settings: Settings) -> tuple[str, str, str]:
+    workspace = settings.workspace_name.strip() or "Research workspace"
+    domain = settings.discipline.strip() or "the researcher's field"
+    focus = settings.research_focus.strip()
+    focus_line = f"Research focus: {focus}.\n\n" if focus else ""
     retain_mission = (
-        "Use this bank for the user's durable Agent Memory research cognition. "
-        "Apply this retention policy:\n\n" + memory_policy
+        f"Use this bank for the researcher's durable research cognition in the {workspace} workspace. "
+        f"The field is {domain}.\n\n{focus_line}"
+        "Retain only explicit, durable judgments, hypotheses, decisions, concepts, and stable preferences. "
+        "Do not treat questions, tentative discussion, paper facts, retrieved passages, routine answers, "
+        "or temporary tasks as the researcher's views. Paper evidence remains external to personal memory. "
+        "When a new view revises an older one, mark the new view as current and preserve only relevant history."
     )
     reflect_mission = (
-        "Synthesize the user's evolving long-term understanding of Agent Memory. "
-        "Keep remembered judgments distinct from verified paper evidence. "
-        "Apply this response distinction:\n\n" + evidence_policy
+        f"Synthesize the researcher's longer-term understanding in the {workspace} workspace ({domain}).\n\n"
+        f"{focus_line}Separate remembered judgments from external paper evidence and from the current synthesis. "
+        "Do not present a synthesis as a remembered judgment or as a paper claim. Identify meaningful changes "
+        "in the researcher's views over time."
     )
     observations_mission = (
-        "Consolidate durable Agent Memory research cognition while preserving the user's attribution "
-        "and meaningful changes over time. Apply this retention policy:\n\n" + memory_policy
+        f"Consolidate durable research cognition for the {workspace} workspace ({domain}).\n\n"
+        f"{focus_line}Preserve the researcher's attribution and meaningful changes over time. "
+        "Keep paper facts separate from personal judgments; do not infer a durable view from a question, "
+        "tentative discussion, or paper summary."
+    )
+    return retain_mission, reflect_mission, observations_mission
+
+
+def _bank_configuration(bank: dict[str, Any]) -> dict[str, Any]:
+    config = bank.get("config") or bank.get("configuration") or bank.get("bank_config") or {}
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except json.JSONDecodeError:
+            return {}
+    return config if isinstance(config, dict) else {}
+
+
+def _inspect_hindsight_bank(settings: Settings) -> HindsightBankInspection:
+    retain_mission, reflect_mission, observations_mission = _missions(settings)
+    bank_id = settings.hindsight_bank_id
+    query = urlencode({"q": bank_id, "limit": 100, "offset": 0})
+    listed = _hindsight_rest_json("GET", f"/v1/default/banks?{query}")
+    existing = next(
+        (
+            bank
+            for bank in listed.get("banks", [])
+            if isinstance(bank, dict) and str(bank.get("bank_id")) == bank_id
+        ),
+        None,
+    )
+    if existing is None:
+        return HindsightBankInspection(bank_id=bank_id, exists=False)
+
+    encoded_id = quote(bank_id, safe="")
+    config_response = _hindsight_rest_json("GET", f"/v1/default/banks/{encoded_id}/config")
+    config = config_response.get("config")
+    if not isinstance(config, dict):
+        config = _bank_configuration(existing)
+    desired = {
+        "mission": reflect_mission,
+        "retain_mission": retain_mission,
+        "reflect_mission": reflect_mission,
+        "observations_mission": observations_mission,
+    }
+    changes: list[MissionChange] = []
+    unavailable: list[str] = []
+    for field, wanted in desired.items():
+        actual = existing.get(field)
+        if actual is None:
+            actual = config.get(field)
+        if actual is None:
+            unavailable.append(field)
+        elif actual != wanted:
+            changes.append(MissionChange(field=field, current=str(actual), desired=wanted))
+    return HindsightBankInspection(
+        bank_id=bank_id,
+        exists=True,
+        name=str(existing.get("name") or "") or None,
+        changes=tuple(changes),
+        unavailable_fields=tuple(unavailable),
     )
 
-    async with Client(HINDSIGHT_MCP_URL, read_timeout_seconds=30) as client:
-        listed = json.loads(await _call(client, "list_banks", {"query": BANK_ID}))
-        existing_ids = {
-            str(bank["bank_id"])
-            for bank in listed.get("banks", [])
-            if isinstance(bank, dict) and bank.get("bank_id")
-        }
-        if BANK_ID not in existing_ids:
-            await _call(
-                client,
-                "create_bank",
-                {"bank_id": BANK_ID, "name": "Agent Memory Research", "mission": reflect_mission},
-            )
-        await _call(
-            client,
-            "update_bank",
-            {
-                "bank_id": BANK_ID,
-                "config_updates": {
-                    "retain_mission": retain_mission,
-                    "reflect_mission": reflect_mission,
-                    "observations_mission": observations_mission,
-                },
+
+async def inspect_hindsight_bank_async(settings: Settings | None = None) -> HindsightBankInspection:
+    current = settings or get_settings()
+    return _inspect_hindsight_bank(current)
+
+
+def inspect_hindsight_bank(settings: Settings | None = None) -> HindsightBankInspection:
+    return asyncio.run(inspect_hindsight_bank_async(settings))
+
+
+async def configure_hindsight_bank(
+    settings: Settings | None = None,
+    *,
+    update_existing: bool = False,
+    adopt_existing: bool = False,
+) -> str:
+    current = settings or get_settings()
+    bank_id = current.hindsight_bank_id
+    retain_mission, reflect_mission, observations_mission = _missions(current)
+
+    inspection = _inspect_hindsight_bank(current)
+    encoded_id = quote(bank_id, safe="")
+    config_updates = {
+        "retain_mission": retain_mission,
+        "reflect_mission": reflect_mission,
+        "observations_mission": observations_mission,
+    }
+    if not inspection.exists:
+        _hindsight_rest_json(
+            "PUT",
+            f"/v1/default/banks/{encoded_id}",
+            body={
+                "name": current.workspace_name,
+                "mission": reflect_mission,
+                **config_updates,
             },
         )
-        bank = json.loads(await _call(client, "get_bank", {"bank_id": BANK_ID}))
-        if bank.get("mission") != reflect_mission:
-            raise RuntimeError("Hindsight did not confirm the configured reflect mission.")
+        action = "created"
+    else:
+        if not adopt_existing and not current.legacy_data_compatibility:
+            raise ValueError(
+                f"Hindsight bank '{bank_id}' already exists with unknown workspace ownership. "
+                "Confirm adoption before using it."
+            )
+        if inspection.changes and not update_existing:
+            return "needs-confirmation"
+        if update_existing:
+            _hindsight_rest_json(
+                "PATCH",
+                f"/v1/default/banks/{encoded_id}/config",
+                body={"updates": config_updates},
+            )
+            action = "updated"
+        else:
+            return "unchanged"
+
+    verified = _inspect_hindsight_bank(current)
+    if not verified.exists:
+        raise RuntimeError("Hindsight did not confirm the configured bank.")
+    remaining = [change.field for change in verified.changes]
+    if remaining:
+        raise RuntimeError("Hindsight did not confirm the configured missions: " + ", ".join(remaining))
+    return action
 
 
 def main() -> None:
     try:
-        asyncio.run(configure_hindsight_bank())
+        result = asyncio.run(configure_hindsight_bank())
     except Exception as exc:
-        print(f"Could not configure the Hindsight bank: {exc}", file=sys.stderr)
+        message = str(exc)
+        try:
+            message = redact_sensitive_text(message, get_settings())
+        except Exception:
+            pass
+        print(f"Could not configure the Hindsight bank: {redact_service_text(message)}", file=sys.stderr)
         raise SystemExit(1) from exc
-    print(f"Configured Hindsight bank: {BANK_ID}")
+    print(f"Hindsight bank: {get_settings().hindsight_bank_id} ({result})")
 
 
 if __name__ == "__main__":

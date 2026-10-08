@@ -1,4 +1,5 @@
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -111,6 +112,28 @@ def test_install_reports_missing_systemd(tmp_path, monkeypatch):
         service.install_user_service(Settings(_env_file=None), tmp_path)
 
 
+def test_service_environment_write_failure_preserves_existing_file(tmp_path, monkeypatch):
+    paths = service.service_paths(tmp_path)
+    paths.config_dir.mkdir(parents=True)
+    paths.env_file.write_text("CUSTOM_SETTING=keep\n", encoding="utf-8")
+    original_replace = service.os.replace
+
+    def fail_replace(source, destination):
+        if Path(destination) == paths.env_file:
+            raise OSError("simulated replace failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(service.os, "replace", fail_replace)
+    settings = Settings(_env_file=None, hindsight_api_llm_api_key="private-test-key")
+
+    with pytest.raises(OSError, match="simulated replace failure"):
+        service.prepare_service_environment(settings, tmp_path)
+
+    assert paths.env_file.read_text(encoding="utf-8") == "CUSTOM_SETTING=keep\n"
+    assert "private-test-key" not in paths.env_file.read_text(encoding="utf-8")
+    assert not list(paths.config_dir.glob(".hindsight.env.*.tmp"))
+
+
 def test_restart_waits_until_api_is_ready(monkeypatch):
     commands = []
 
@@ -140,3 +163,36 @@ def test_logs_are_bounded_and_use_journalctl(monkeypatch):
                          "-n", "25", "--no-pager"]]
     with pytest.raises(ValueError, match="1 到 1000"):
         service.service_logs(0, runner)
+
+
+def test_logs_redact_workspace_and_shared_service_secrets(tmp_path, monkeypatch):
+    paths = service.service_paths(tmp_path)
+    paths.config_dir.mkdir(parents=True)
+    paths.env_file.write_text(
+        'HINDSIGHT_API_LLM_API_KEY="service-secret"\n'
+        'HINDSIGHT_API_LLM_BASE_URL="https://internal.example/v1"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(service, "service_paths", lambda home=None: paths)
+    monkeypatch.setattr(service, "systemd_user_available", lambda runner=subprocess.run: True)
+    monkeypatch.setenv("QDRANT_API_KEY", "process-secret")
+
+    def runner(args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="key=process-secret api=service-secret endpoint=https://internal.example/v1\n",
+            stderr="",
+        )
+
+    settings = Settings(
+        _env_file=None,
+        embedding_api_key="workspace-secret",
+        embedding_base_url="https://embed.example/v1",
+    )
+    output = service.service_logs(10, runner, settings)
+
+    assert "process-secret" not in output
+    assert "service-secret" not in output
+    assert "https://internal.example/v1" not in output
+    assert "[REDACTED]" in output

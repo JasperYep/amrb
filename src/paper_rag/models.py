@@ -10,6 +10,8 @@ class PaperHit(BaseModel):
     page: int
     score: float
     text: str
+    retrieval_method: str = "vector_similarity"
+    page_numbering: str = "pdf_order"
 
     @computed_field
     @property
@@ -19,9 +21,11 @@ class PaperHit(BaseModel):
 
 
 class PaperBrief(BaseModel):
-    paper_id: str
+    paper_id: str | None
     title: str
     file_name: str
+    index_status: str = "indexed"
+    index_message: str | None = None
 
 
 class PaperPage(BaseModel):
@@ -31,6 +35,7 @@ class PaperPage(BaseModel):
     page: int
     citation: str
     text: str
+    page_numbering: str = "pdf_order"
 
 
 class IngestResult(BaseModel):
@@ -50,11 +55,13 @@ class PaperRAGStatus(BaseModel):
 
 
 class PaperRecord(BaseModel):
-    paper_id: str
+    paper_id: str | None
     title: str
     file_name: str
     pages: int | None = None
     chunks: int = 0
+    index_status: str = "indexed"
+    index_message: str | None = None
 
 
 class PaperFailure(BaseModel):
@@ -95,6 +102,11 @@ class SystemStatus(BaseModel):
     qdrant: str
     papers: int
     chunks: int
+    workspace_id: str = ""
+    workspace_name: str = ""
+    memory_bank: str = ""
+    collection: str = ""
+    configuration: dict[str, str] = Field(default_factory=dict)
 
 
 class DoctorReport(BaseModel):
@@ -106,3 +118,8 @@ class DoctorReport(BaseModel):
     memory_bank: ComponentHealth
     papers: int
     chunks: int
+    workspace_id: str = ""
+    workspace_name: str = ""
+    memory_bank_id: str = ""
+    collection: str = ""
+    configuration: dict[str, str] = Field(default_factory=dict)

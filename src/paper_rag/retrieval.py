@@ -5,7 +5,7 @@ from threading import RLock
 from typing import Any
 
 from llama_index.core import VectorStoreIndex
-from llama_index.core.schema import MetadataMode
+from llama_index.core.schema import MetadataMode, QueryBundle
 from llama_index.core.vector_stores import MetadataFilter, MetadataFilters
 
 from paper_rag.config import (
@@ -15,8 +15,9 @@ from paper_rag.config import (
     create_vector_store,
     ensure_paper_id_payload_index,
     get_settings,
+    verify_qdrant_collection_identity,
 )
-from paper_rag.ingest import load_manifest
+from paper_rag.ingest import load_manifest, sha256_file, validate_index_compatibility
 from paper_rag.models import PaperBrief, PaperHit, PaperPage, PaperRAGStatus
 
 
@@ -29,31 +30,36 @@ class _SearchResources:
 
 
 _RESOURCE_LOCK = RLock()
-_DEFAULT_EMBEDDING_MODEL: Any | None = None
-_DEFAULT_REMOTE_SEARCH_RESOURCES: _SearchResources | None = None
+_DEFAULT_EMBEDDING_MODELS: dict[str, Any] = {}
+_DEFAULT_REMOTE_SEARCH_RESOURCES: dict[str, _SearchResources] = {}
 
 
-def _default_embedding_model() -> Any:
-    global _DEFAULT_EMBEDDING_MODEL
+def _workspace_cache_key(settings: Settings) -> str:
+    return f"{settings.workspace_root.resolve()}:{settings.workspace_id}"
+
+
+def _default_embedding_model(settings: Settings | None = None) -> Any:
+    current = settings or get_settings()
+    key = _workspace_cache_key(current)
     with _RESOURCE_LOCK:
-        if _DEFAULT_EMBEDDING_MODEL is None:
-            _DEFAULT_EMBEDDING_MODEL = create_embedding_model(get_settings())
-        return _DEFAULT_EMBEDDING_MODEL
+        if key not in _DEFAULT_EMBEDDING_MODELS:
+            _DEFAULT_EMBEDDING_MODELS[key] = create_embedding_model(current)
+        return _DEFAULT_EMBEDDING_MODELS[key]
 
 
 def _default_remote_search_resources(settings: Settings) -> _SearchResources:
-    global _DEFAULT_REMOTE_SEARCH_RESOURCES
+    key = _workspace_cache_key(settings)
     with _RESOURCE_LOCK:
-        if _DEFAULT_REMOTE_SEARCH_RESOURCES is None:
+        if key not in _DEFAULT_REMOTE_SEARCH_RESOURCES:
             client = create_qdrant_client(settings)
             try:
                 if not client.collection_exists(settings.qdrant_collection):
                     raise ValueError(
-                        "Paper RAG 尚未建立索引。\n\n"
-                        "请先运行：\n\nuv run paper-rag ingest"
+                        "The paper index has not been created yet. Run `amrb paper sync` after adding PDFs."
                     )
+                verify_qdrant_collection_identity(client, settings)
                 store = create_vector_store(client, settings)
-                embedding_model = _default_embedding_model()
+                embedding_model = _default_embedding_model(settings)
                 index = VectorStoreIndex.from_vector_store(
                     vector_store=store,
                     embed_model=embedding_model,
@@ -61,19 +67,19 @@ def _default_remote_search_resources(settings: Settings) -> _SearchResources:
             except Exception:
                 client.close()
                 raise
-            _DEFAULT_REMOTE_SEARCH_RESOURCES = _SearchResources(
+            _DEFAULT_REMOTE_SEARCH_RESOURCES[key] = _SearchResources(
                 client=client,
                 store=store,
                 embedding_model=embedding_model,
                 index=index,
             )
-        return _DEFAULT_REMOTE_SEARCH_RESOURCES
+        return _DEFAULT_REMOTE_SEARCH_RESOURCES[key]
 
 
 def _close_default_remote_search_client() -> None:
     with _RESOURCE_LOCK:
-        if _DEFAULT_REMOTE_SEARCH_RESOURCES is not None:
-            _DEFAULT_REMOTE_SEARCH_RESOURCES.client.close()
+        for resources in _DEFAULT_REMOTE_SEARCH_RESOURCES.values():
+            resources.client.close()
 
 
 register(_close_default_remote_search_client)
@@ -82,16 +88,70 @@ register(_close_default_remote_search_client)
 def list_papers(settings: Settings | None = None) -> list[PaperBrief]:
     current = settings or get_settings()
     manifest = load_manifest(current.manifest_path)
-    papers = [
-        PaperBrief(
-            paper_id=str(entry["paper_id"]),
-            title=str(entry.get("title") or Path(path).stem),
-            file_name=Path(path).name,
+    failures = load_manifest(current.state_dir / "index-failures.json")
+    papers: list[PaperBrief] = []
+    for path, entry in sorted(manifest.items()):
+        source = (current.workspace_root / path).resolve()
+        title = str(entry.get("title") or source.stem)
+        failure = failures.get(path)
+        status = _paper_index_status(path, entry, current, failure)
+        papers.append(
+            PaperBrief(
+                paper_id=str(entry["paper_id"]) if entry.get("paper_id") else None,
+                title=title,
+                file_name=source.name,
+                index_status=status,
+                index_message=str(failure.get("message")) if status == "failed" and failure else None,
+            )
         )
-        for path, entry in sorted(manifest.items())
-        if entry.get("paper_id")
-    ]
+    tracked = set(manifest)
+    for source in sorted(current.papers_dir.glob("*.pdf")):
+        relative_path = source.relative_to(current.workspace_root).as_posix()
+        if relative_path in tracked or not source.is_file():
+            continue
+        title = source.stem
+        try:
+            import pymupdf
+
+            with pymupdf.open(source) as pdf:
+                title = str((pdf.metadata or {}).get("title") or "").strip() or title
+        except Exception:
+            pass
+        failure = failures.get(relative_path)
+        source_hash = sha256_file(source)
+        status = "failed" if failure and failure.get("source_sha256") == source_hash else "not_indexed"
+        papers.append(
+            PaperBrief(
+                paper_id=None,
+                title=title,
+                file_name=source.name,
+                index_status=status,
+                index_message=str(failure.get("message")) if status == "failed" and failure else None,
+            )
+        )
     return papers
+
+
+def _paper_index_status(
+    relative_path: str,
+    entry: dict[str, Any],
+    settings: Settings,
+    failure: dict[str, Any] | None = None,
+) -> str:
+    source = (settings.workspace_root / relative_path).resolve()
+    if not source.is_relative_to(settings.papers_dir.resolve()) or not source.is_file():
+        return "source_missing"
+    try:
+        source_hash = sha256_file(source)
+        if failure and failure.get("source_sha256") == source_hash:
+            return "failed"
+        if entry.get("sha256") and source_hash != entry["sha256"]:
+            return "source_changed"
+    except OSError:
+        return "source_missing"
+    if not isinstance(entry.get("index_config"), dict) and not settings.legacy_index_accepted:
+        return "unverified"
+    return "indexed"
 
 
 def _match_paper_id(paper: str, settings: Settings) -> str | None:
@@ -99,11 +159,12 @@ def _match_paper_id(paper: str, settings: Settings) -> str | None:
     candidates: dict[str, str] = {}
     for brief in list_papers(settings):
         aliases = {
-            brief.paper_id.casefold(),
             brief.title.casefold(),
             brief.file_name.casefold(),
             Path(brief.file_name).stem.casefold(),
         }
+        if brief.paper_id:
+            aliases.add(brief.paper_id.casefold())
         if query in aliases:
             return brief.paper_id
         if any(query in alias for alias in aliases):
@@ -130,6 +191,7 @@ def search_papers(
     count = top_k if top_k is not None else current.rag_top_k
     if count < 1 or count > 100:
         raise ValueError("top_k 必须在 1 到 100 之间。")
+    validate_index_compatibility(load_manifest(current.manifest_path), current)
     if paper:
         paper_id = _match_paper_id(paper, current)
         if paper_id is None:
@@ -160,9 +222,9 @@ def search_papers(
         if cached_resources is None:
             if not client.collection_exists(current.qdrant_collection):
                 raise ValueError(
-                    "Paper RAG 尚未建立索引。\n\n"
-                    "请先运行：\n\nuv run paper-rag ingest"
+                    "The paper index has not been created yet. Run `amrb paper sync` after adding PDFs."
                 )
+            verify_qdrant_collection_identity(client, current)
             store = create_vector_store(client, current)
         else:
             store = cached_resources.store
@@ -170,7 +232,7 @@ def search_papers(
             ensure_paper_id_payload_index(client, current)
         if cached_resources is None:
             active_embedding = embedding_model or (
-                _default_embedding_model()
+                _default_embedding_model(current)
                 if settings is None
                 else create_embedding_model(current)
             )
@@ -180,6 +242,21 @@ def search_papers(
             )
         else:
             index = cached_resources.index
+            active_embedding = cached_resources.embedding_model
+        recorded_dimensions = {
+            int(profile["dimension"])
+            for entry in load_manifest(current.manifest_path).values()
+            if isinstance((profile := entry.get("index_config")), dict) and profile.get("dimension")
+        }
+        expected_dimension = current.embedding_dimension
+        if expected_dimension is None and len(recorded_dimensions) == 1:
+            expected_dimension = next(iter(recorded_dimensions))
+        query_embedding = active_embedding.get_query_embedding(query)
+        if expected_dimension is not None and len(query_embedding) != expected_dimension:
+            raise ValueError(
+                f"Embedding query returned dimension {len(query_embedding)}, but the workspace index requires "
+                f"{expected_dimension}. Search was blocked; explicitly rebuild the workspace index to change dimensions."
+            )
         filters = (
             MetadataFilters(filters=[MetadataFilter(key="paper_id", value=paper_id)])
             if paper_id
@@ -187,7 +264,7 @@ def search_papers(
         )
         retriever = index.as_retriever(similarity_top_k=count, filters=filters)
         hits = []
-        for result in retriever.retrieve(query):
+        for result in retriever.retrieve(QueryBundle(query_str=query, embedding=query_embedding)):
             metadata = result.node.metadata
             page = metadata.get("page_number")
             if page is None:
@@ -200,6 +277,8 @@ def search_papers(
                     page=int(page),
                     score=float(result.score or 0.0),
                     text=result.node.get_content(metadata_mode=MetadataMode.NONE),
+                    retrieval_method="vector_similarity",
+                    page_numbering="pdf_order",
                 )
             )
         return hits
@@ -239,7 +318,7 @@ def get_paper_pages(
     if not source_path.is_relative_to(papers_root) or source_path.suffix.lower() != ".pdf":
         raise ValueError("索引 manifest 中的论文路径无效。")
     if not source_path.is_file():
-        raise ValueError(f"论文文件不存在：{source_path.name}；请先运行 paper-rag ingest。")
+        raise ValueError(f"Paper source file is missing: {source_path.name}.")
 
     title = str(entry.get("title") or source_path.stem)
     pages: list[PaperPage] = []
